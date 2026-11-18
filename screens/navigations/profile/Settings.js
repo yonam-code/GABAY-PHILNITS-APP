@@ -7,6 +7,7 @@ import KeyboardAvoidingView from '../../../components/KeyboardSafeView'
 import { Feather } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { supabase } from '../../../utils/supabase'
+import { escapeLike } from '../../../utils/emailMatch'
 import { sendEmailJsOtp } from '../../../utils/emailjs'
 import { getUserCache, saveUserCache } from '../../../utils/database'
 import { getModalBottomPadding } from '../../../utils/responsiveLayout'
@@ -123,7 +124,7 @@ export default function Settings({ navigation }) {
           const { data } = await supabase
             .from('users')
             .select('pin_hash')
-            .ilike('email', emailToMatch)
+            .ilike('email', escapeLike(emailToMatch))
             .maybeSingle()
           if (data?.pin_hash && String(data.pin_hash).trim().length > 0) {
             pinFound = true
@@ -160,7 +161,7 @@ export default function Settings({ navigation }) {
         const { data } = await supabase
           .from('users')
           .select('pin_hash')
-          .ilike('email', emailToMatch)
+          .ilike('email', escapeLike(emailToMatch))
           .maybeSingle()
 
         if (data?.pin_hash && String(data.pin_hash).trim().length > 0) {
@@ -315,7 +316,7 @@ export default function Settings({ navigation }) {
         const { error } = await supabase
           .from('users')
           .update({ pin_hash: null })
-          .ilike('email', (user.email || '').trim())
+          .ilike('email', escapeLike((user.email || '').trim()))
         if (error) throw error
 
         await saveUserCache(user.id, null, true, true)

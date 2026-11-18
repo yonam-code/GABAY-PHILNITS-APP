@@ -45,6 +45,7 @@ import EdgeHandleAI from './components/EdgeHandleAI'
 import OfflineToast from './components/OfflineToast'
 import NotificationToast from './components/NotificationToast'
 import { supabase } from './utils/supabase'
+import { escapeLike } from './utils/emailMatch'
 import NetInfo from '@react-native-community/netinfo'
 import { initDb, getUserCache, saveUserCache, saveUserSession, getActiveUserSession, clearUserSession } from './utils/database'
 import { clearCache } from './utils/cache'
@@ -124,7 +125,7 @@ export default function App() {
 			}
 			const [personalRes, userRes] = await Promise.all([
 				supabase.from('personal_info').select('user_id, target_exam_level').eq('user_id', activeUser.id).maybeSingle(),
-				supabase.from('users').select('pin_hash').ilike('email', activeUser.email).maybeSingle(),
+				supabase.from('users').select('pin_hash').ilike('email', escapeLike(activeUser.email)).maybeSingle(),
 			])
 			// Only overwrite the cache if the queries actually succeeded
 			if (personalRes?.error || userRes?.error) return
@@ -219,7 +220,7 @@ export default function App() {
 				const [personalRes, diagnosticRes, pinRes] = await Promise.all([
 					supabase.from('personal_info').select('user_id, target_exam_level').eq('user_id', userId).maybeSingle(),
 					supabase.from('diagnostic_assessment_attempts').select('id').eq('user_id', userId).limit(1).maybeSingle(),
-					supabase.from('users').select('pin_hash').ilike('email', activeUser.email).maybeSingle(),
+					supabase.from('users').select('pin_hash').ilike('email', escapeLike(activeUser.email)).maybeSingle(),
 				])
 				const personalInfoData = personalRes?.data
 

@@ -5,6 +5,7 @@ import {
 } from './database'
 import { getCache, setCache } from './cache'
 import { supabase } from './supabase'
+import { escapeLike } from './emailMatch'
 
 let isSyncing = false
 const syncListeners = new Set()
@@ -74,7 +75,7 @@ export const runQueueItem = async (item, payload, options) => {
         }
         if (payload.email) {
             const { email: targetEmail, ...updateFields } = payload
-            const { error } = await supabase.from(table).update(updateFields).ilike('email', targetEmail)
+            const { error } = await supabase.from(table).update(updateFields).ilike('email', escapeLike(targetEmail))
             return { error }
         }
         if (table === 'users') {
@@ -82,7 +83,7 @@ export const runQueueItem = async (item, payload, options) => {
             const sessionEmail = session?.user?.email
             if (!sessionEmail) return { discard: true }
             const { email: _, id: __, user_id: ___, ...updateFields } = payload
-            const { error } = await supabase.from('users').update(updateFields).ilike('email', sessionEmail)
+            const { error } = await supabase.from('users').update(updateFields).ilike('email', escapeLike(sessionEmail))
             return { error }
         }
         return { discard: true }

@@ -5,6 +5,7 @@ import { Feather, Ionicons } from '@expo/vector-icons'
 import * as WebBrowser from 'expo-web-browser'
 import * as QueryParams from 'expo-auth-session'
 import { supabase } from '../../utils/supabase'
+import { escapeLike } from '../../utils/emailMatch'
 import { sendEmailJsOtp } from '../../utils/emailjs'
 import { saveUserCache, saveUserSession } from '../../utils/database'
 
@@ -31,7 +32,7 @@ export default function Login({ navigation }) {
         const { data: existingUser } = await supabase
           .from('users')
           .select('email')
-          .ilike('email', effectiveEmail)
+          .ilike('email', escapeLike(effectiveEmail))
           .maybeSingle()
 
         if (!existingUser) {
@@ -78,7 +79,7 @@ export default function Login({ navigation }) {
     const { data: pinData } = await supabase
       .from('users')
       .select('pin_hash')
-      .ilike('email', effectiveEmail)
+      .ilike('email', escapeLike(effectiveEmail))
       .maybeSingle()
 
     const hasPin = Boolean(pinData?.pin_hash && String(pinData.pin_hash).trim().length > 0)

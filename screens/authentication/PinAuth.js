@@ -17,6 +17,7 @@ import {
 import KeyboardAvoidingView from '../../components/KeyboardSafeView'
 import { Feather } from '@expo/vector-icons'
 import { supabase } from '../../utils/supabase'
+import { escapeLike } from '../../utils/emailMatch'
 import { getUserCache, saveUserCache, getActiveUserSession, clearUserSession } from '../../utils/database'
 import { clearCache } from '../../utils/cache'
 import { sendEmailJsOtp } from '../../utils/emailjs'
@@ -163,7 +164,7 @@ export default function PinAuth({ navigation }) {
           const { data, error: qErr } = await supabase
             .from('users')
             .select('pin_hash')
-            .ilike('email', effectiveEmail)
+            .ilike('email', escapeLike(effectiveEmail))
             .maybeSingle()
 
           if (!qErr && data?.pin_hash && String(data.pin_hash).trim().length > 0) {
@@ -262,7 +263,7 @@ export default function PinAuth({ navigation }) {
           await supabase
             .from('users')
             .update({ pin_hash: enteredHash })
-            .ilike('email', userEmail)
+            .ilike('email', escapeLike(userEmail))
           if (userId) {
             await saveUserCache(userId, enteredHash, true, true)
           }

@@ -13,6 +13,7 @@ import {
 } from 'react-native'
 import { Feather } from '@expo/vector-icons'
 import { supabase } from '../../utils/supabase'
+import { escapeLike } from '../../utils/emailMatch'
 import { saveUserCache } from '../../utils/database'
 
 const NAVY = '#0f1e35'
@@ -146,7 +147,7 @@ export default function SetPin({ navigation, route }) {
       const { data: updatedRows, error: updateError } = await supabase
         .from('users')
         .update({ pin_hash: hash })
-        .ilike('email', emailToMatch)
+        .ilike('email', escapeLike(emailToMatch))
         .select('pin_hash')
 
       if (updateError) throw updateError

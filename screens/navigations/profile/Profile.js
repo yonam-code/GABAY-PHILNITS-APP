@@ -45,6 +45,8 @@ export default function Profile({ session: initialSession, navigation }) {
     })
   }
 
+  const lastProfileFetchRef = React.useRef(0)
+
   const loadSessionAndProfile = async () => {
     try {
       let currentUser = user
@@ -64,6 +66,10 @@ export default function Profile({ session: initialSession, navigation }) {
           setProfile(cached)
           setLoading(false)
         }
+
+        // Cached copy is already shown; only hit the network again if it is older than 60 s
+        if (cached && Date.now() - lastProfileFetchRef.current < 60000) return
+        lastProfileFetchRef.current = Date.now()
 
         const { data, error } = await supabase
           .from('users')

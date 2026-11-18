@@ -6,6 +6,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons'
 import { supabase } from '../../../utils/supabase'
+import { resolveImageUrl } from '../../../utils/imageUrl'
 import { SkeletonItem } from '../../../components/Skeleton'
 import { getCache, setCache, clearCache } from '../../../utils/cache'
 import { withTimeout } from '../../../utils/queryHelper'
@@ -636,9 +637,41 @@ function DefaultBookCover({ item }) {
  *
  * @param {{ item: any, onPress: any }} props
  */
+// id -> cover_image_url, loaded on its own (the main shelf query leaves this column out)
+async function fetchCoverMap() {
+  const cacheKey = 'library_cover_map'
+  try {
+    const res = await withTimeout(
+      supabase.from('reading_materials').select('id, cover_image_url').eq('is_published', true).not('cover_image_url', 'is', null),
+      12000
+    )
+    if (res?.error) throw res.error
+    const map = {}
+    ;(res?.data || []).forEach((r) => { if (r?.id && r.cover_image_url) map[r.id] = r.cover_image_url })
+    if (Object.keys(map).length > 0) setCache(cacheKey, map, 24 * 60 * 60 * 1000).catch(() => { })
+    return map
+  } catch (_) {
+    return (await getCache(cacheKey)) || null
+  }
+}
+
+// Video thumbnail with fallbacks: stored URL -> YouTube hqdefault -> mqdefault -> neutral placeholder
+function VideoThumb({ thumb, youtubeId, style }) {
+  const sources = [
+    resolveImageUrl(thumb),
+    youtubeId ? `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg` : null,
+    youtubeId ? `https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg` : null,
+  ].filter(Boolean)
+  const [stage, setStage] = useState(0)
+  useEffect(() => { setStage(0) }, [thumb, youtubeId])
+  if (stage >= sources.length) return <View style={[style, { backgroundColor: '#1e293b' }]} />
+  return <Image source={{ uri: sources[stage] }} style={style} onError={() => setStage((s) => s + 1)} />
+}
+
 function MaterialCard({ item, onPress }) {
   const [imageError, setImageError] = useState(false)
-  const coverUrl = item.cover_image_url || item.cover_url || item.thumbnail_url || item.image_url
+  const coverUrl = resolveImageUrl(item.cover_image_url || item.cover_url || item.thumbnail_url || item.image_url)
+  useEffect(() => { setImageError(false) }, [coverUrl])
   const progress = item.progress || 0
   const hasValidImage = !!coverUrl && !imageError
 
@@ -987,6 +1020,15 @@ export default function Library({ navigation }) {
         setCache('library_target_exam', targetTrack).catch(() => { })
         setCache('library_materials', materialsWithProgress).catch(() => { })
         setCache('library_videos', finalVideos).catch(() => { })
+
+        // Covers are fetched separately so the shelf appears immediately; they fill in as soon as they arrive
+        fetchCoverMap().then((coverMap) => {
+          if (!coverMap || Object.keys(coverMap).length === 0) return
+          const withCovers = (list) => list.map((m) => (coverMap[m.id] ? { ...m, cover_image_url: coverMap[m.id] } : m))
+          _memoryCachedMaterials = withCovers(_memoryCachedMaterials || materialsWithProgress)
+          setMaterials((prev) => withCovers(prev))
+          setCache('library_materials', _memoryCachedMaterials).catch(() => { })
+        }).catch(() => { })
       } else if (rawMaterials.length === 0 && rRes.status === 'fulfilled') {
         // Query succeeded but returned 0 items from remote
         _memoryCachedMaterials = []
@@ -1464,7 +1506,7 @@ export default function Library({ navigation }) {
                               onPress={() => navigation?.navigate('VideoLectureDetail', { video, hideNav: true })}
                             >
                               <View style={styles.videoThumbnailWrapper}>
-                                <Image source={{ uri: thumb }} style={styles.videoThumbnail} />
+                                <VideoThumb thumb={thumb} youtubeId={yId} style={styles.videoThumbnail} />
                                 <View style={styles.videoPlayOverlay}>
                                   <View style={styles.playIconCircle}>
                                     <Ionicons name="play" size={16} color="#ffffff" style={{ marginLeft: 2 }} />

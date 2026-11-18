@@ -1,7 +1,7 @@
-import React from 'react'
+import React, { useState } from 'react'
 import {
   StyleSheet, Text, View, ScrollView, TouchableOpacity,
-  Linking, StatusBar, Platform, Dimensions
+  Linking, StatusBar, Platform, Dimensions, Image, ActivityIndicator
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Ionicons, Feather } from '@expo/vector-icons'
@@ -38,7 +38,16 @@ export default function VideoLectureDetail({ navigation, route }) {
   const subject = video.subject || 'PhilNITS Exam Review'
 
   const bundleId = 'com.anonymous.gabay_philnits'
-  const embedUrl = `https://www.youtube-nocookie.com/embed/${youtubeId}?rel=0&autoplay=0&playsinline=1&controls=1&enablejsapi=1&origin=https://${bundleId}`
+  // The heavy YouTube player is only created when the user taps play (screen opens instantly, no data used until then)
+  const [playerActive, setPlayerActive] = useState(false)
+  const [playerLoading, setPlayerLoading] = useState(true)
+  const [posterStage, setPosterStage] = useState(0)
+  const posterSources = [
+    video.thumbnail_url && !String(video.thumbnail_url).startsWith('data:') ? video.thumbnail_url : null,
+    `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`,
+    `https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg`,
+  ].filter(Boolean)
+  const embedUrl = `https://www.youtube-nocookie.com/embed/${youtubeId}?rel=0&autoplay=1&playsinline=1&controls=1&enablejsapi=1&origin=https://${bundleId}`
 
   const handleOpenAuthorLink = () => {
     if (authorUrl) {
@@ -76,8 +85,29 @@ export default function VideoLectureDetail({ navigation, route }) {
       >
         {/* Embedded YouTube Player Container */}
         <View style={styles.playerContainer}>
+          {!playerActive ? (
+            <TouchableOpacity style={styles.webview} activeOpacity={0.9} onPress={() => setPlayerActive(true)}>
+              {posterStage < posterSources.length && (
+                <Image
+                  source={{ uri: posterSources[posterStage] }}
+                  style={StyleSheet.absoluteFill}
+                  resizeMode="cover"
+                  onError={() => setPosterStage((s) => s + 1)}
+                />
+              )}
+              <View style={styles.posterPlayWrap}>
+                <View style={styles.posterPlayCircle}>
+                  <Ionicons name="play" size={30} color="#ffffff" style={{ marginLeft: 4 }} />
+                </View>
+              </View>
+            </TouchableOpacity>
+          ) : (
+          <>
           <WebView
             style={styles.webview}
+            onLoadEnd={() => setPlayerLoading(false)}
+            cacheEnabled
+            setSupportMultipleWindows={false}
             originWhitelist={['*']}
             source={{
               uri: embedUrl,
@@ -95,6 +125,13 @@ export default function VideoLectureDetail({ navigation, route }) {
             mixedContentMode="always"
             userAgent="Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
           />
+          {playerLoading && (
+            <View style={styles.posterPlayWrap} pointerEvents="none">
+              <ActivityIndicator size="large" color="#ffffff" />
+            </View>
+          )}
+          </>
+          )}
         </View>
 
         {/* Main Content Area */}
@@ -216,6 +253,21 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: '#000000',
+  },
+  posterPlayWrap: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  posterPlayCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.85)',
   },
   contentContainer: {
     paddingHorizontal: 18,
