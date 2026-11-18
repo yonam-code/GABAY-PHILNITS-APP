@@ -211,68 +211,46 @@ export const precachePracticeContent = async ({ force = false } = {}) => {
 
         console.log('Pre-caching practice questions for offline use...')
 
-        // 1. Multiple Choice Questions
-        const { data: mcqs } = await supabase
-            .from('multiple_choice_questions')
-            .select('*, practice_categories!inner(name)')
-            .eq('is_published', true)
-            .limit(150)
-        if (mcqs && mcqs.length > 0) {
-            await cacheQuestionsLocally('mcq', 'all', mcqs)
-            // Also index by category name for targeted subject practice
-            const byCategory = {}
-            mcqs.forEach(q => {
-                const catName = q.practice_categories?.name
-                if (catName) {
-                    if (!byCategory[catName]) byCategory[catName] = []
-                    byCategory[catName].push(q)
-                }
+        // Cache under the SAME canonical scope the practice screens use: "<track>_<section|all>_pool"
+        // (one row per question, so nothing is duplicated and every screen finds it).
+        const scopeOf = (row) => {
+            const track = String(row.exam_level || row.practice_categories?.exam_level || 'IP').toLowerCase()
+            const section = track === 'fe' && row.fe_section
+                ? String(row.fe_section).replace(/\s+/g, '').toLowerCase()
+                : 'all'
+            return `${track}_${section}_pool`
+        }
+        const cacheGrouped = async (type, rows) => {
+            const groups = {}
+            rows.forEach((r) => {
+                const k = scopeOf(r)
+                if (!groups[k]) groups[k] = []
+                groups[k].push(r)
             })
-            for (const [catName, catQs] of Object.entries(byCategory)) {
-                await cacheQuestionsLocally('mcq', catName, catQs)
+            for (const [scope, list] of Object.entries(groups)) {
+                await cacheQuestionsLocally(type, scope, list)
             }
         }
 
-        // 2. True / False Questions
-        const { data: tfs } = await supabase
-            .from('true_false_questions')
-            .select('*, practice_categories!inner(name)')
-            .eq('is_published', true)
-            .limit(150)
-        if (tfs && tfs.length > 0) {
-            await cacheQuestionsLocally('tf', 'all', tfs)
-            const byCategory = {}
-            tfs.forEach(q => {
-                const catName = q.practice_categories?.name
-                if (catName) {
-                    if (!byCategory[catName]) byCategory[catName] = []
-                    byCategory[catName].push(q)
-                }
-            })
-            for (const [catName, catQs] of Object.entries(byCategory)) {
-                await cacheQuestionsLocally('tf', catName, catQs)
-            }
-        }
-
-        // 3. Flashcards
-        const { data: fcs } = await supabase
-            .from('flashcards')
-            .select('*, flashcard_decks!inner(category_id, practice_categories!inner(name))')
-            .limit(150)
-        if (fcs && fcs.length > 0) {
-            await cacheQuestionsLocally('flashcard', 'all', fcs)
-            const byCategory = {}
-            fcs.forEach(c => {
-                const catName = c.flashcard_decks?.practice_categories?.name
-                if (catName) {
-                    if (!byCategory[catName]) byCategory[catName] = []
-                    byCategory[catName].push(c)
-                }
-            })
-            for (const [catName, catCards] of Object.entries(byCategory)) {
-                await cacheQuestionsLocally('flashcard', catName, catCards)
-            }
-        }
+        const [mcqRes, tfRes, fcRes, mpRes] = await Promise.allSettled([
+            supabase.from('multiple_choice_questions')
+                .select('*, practice_categories!inner(name, exam_level)')
+                .eq('is_published', true).order('id').limit(300),
+            supabase.from('true_false_questions')
+                .select('*, practice_categories!inner(name, exam_level)')
+                .eq('is_published', true).order('id').limit(300),
+            supabase.from('flashcards')
+                .select('*, flashcard_decks!inner(category_id, exam_level, practice_categories!inner(name, exam_level))')
+                .order('id').limit(300),
+            supabase.from('matching_pairs')
+                .select('*, practice_categories!inner(name, exam_level)')
+                .eq('is_published', true).order('id').limit(200),
+        ])
+        const rowsOf = (r) => (r.status === 'fulfilled' && !r.value?.error && Array.isArray(r.value?.data)) ? r.value.data : []
+        await cacheGrouped('mcq', rowsOf(mcqRes))
+        await cacheGrouped('tf', rowsOf(tfRes))
+        await cacheGrouped('flashcard', rowsOf(fcRes))
+        await cacheGrouped('matching', rowsOf(mpRes))
 
         await setCache('precache_practice_done', true, 12 * 60 * 60 * 1000)
         console.log('Pre-caching practice content complete.')

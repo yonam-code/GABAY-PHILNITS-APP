@@ -20,6 +20,7 @@ import { resolveUserTargetExam } from '../../../utils/targetExam';
 import { processSyncQueue } from '../../../utils/syncManager';
 import { getCache, setCache } from '../../../utils/cache';
 import { balancePracticeDistribution } from '../../../utils/practiceDistribution';
+import { loadPracticeItems, buildItemMatcher } from '../../../utils/practiceLoader';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CARD_WIDTH = Math.min(SCREEN_WIDTH - 44, 400);
@@ -232,64 +233,50 @@ export default function Flashcards({ navigation, route }) {
 
       const targetDbCategories = getDbCategories(subject);
 
-      const cacheScope = `${activeTrack.toLowerCase()}_${activeSection ? activeSection.replace(/\s+/g, '').toLowerCase() : 'all'}_${(subject || 'all').toLowerCase()}_${(majorCategory || 'all').toLowerCase()}_${(minorCategory || 'all').toLowerCase()}`;
+      const poolScope = `${activeTrack.toLowerCase()}_${activeSection ? activeSection.replace(/\s+/g, '').toLowerCase() : 'all'}_pool`;
 
-      let loadedCards = [];
+      const buildBaseQuery = () => {
+        let q = supabase.from('flashcards')
+          .select('*, flashcard_decks!inner(category_id, exam_level, practice_categories!inner(name, exam_level))', { count: 'exact' })
+          .eq('exam_level', activeTrack);
 
-      // 1. Instant local SQLite cache lookup first (instant load)
-      try {
-        const localCards = await getLocalQuestions('flashcard', cacheScope, 100);
-        if (localCards && localCards.length > 0) {
-          const balancedLocal = balancePracticeDistribution(localCards, limit, subject, majorCategory, minorCategory);
-          loadedCards = balancedLocal;
-          rawCardsRef.current = balancedFresh || balancedLocal;
-          applyDeckOrder(isShuffle);
-          setLoading(false);
-        }
-      } catch (_) {}
-
-      // 2. Fetch fresh cards
-      try {
-        const buildBaseQuery = () => {
-          let q = supabase.from('flashcards')
-            .select('*, flashcard_decks!inner(category_id, exam_level, practice_categories!inner(name, exam_level))')
-            .eq('exam_level', activeTrack);
-
-          if (activeTrack === 'FE' && activeSection) {
-            q = q.eq('fe_section', activeSection);
-          }
-
-          if (deckId) {
-            q = q.eq('deck_id', deckId);
-          } else if (minorCategory) {
-            q = q.eq('minor_category', minorCategory);
-          } else if (majorCategory) {
-            q = q.eq('major_category', majorCategory);
-          } else if (targetDbCategories.length === 1) {
-            q = q.eq('flashcard_decks.practice_categories.name', targetDbCategories[0]);
-          } else {
-            q = q.in('flashcard_decks.practice_categories.name', targetDbCategories);
-          }
-          return q;
-        };
-
-        // Fetch up to 100 cards to allow even alternating round-robin distribution
-        const { data: freshItems, error: cErr } = await buildBaseQuery().limit(100);
-        let freshCards = [];
-        if (!cErr && freshItems && freshItems.length > 0) {
-          freshCards = [...freshItems];
+        if (activeTrack === 'FE' && activeSection) {
+          q = q.eq('fe_section', activeSection);
         }
 
-        if (freshCards.length > 0) {
-          const balancedFresh = balancePracticeDistribution(freshCards, limit, subject, majorCategory, minorCategory);
-          loadedCards = balancedFresh;
-          rawCardsRef.current = balancedFresh;
-          applyDeckOrder(isShuffle);
-          cacheQuestionsLocally('flashcard', cacheScope, freshCards).catch(() => {});
+        if (deckId) {
+          q = q.eq('deck_id', deckId);
+        } else if (minorCategory) {
+          q = q.eq('minor_category', minorCategory);
+        } else if (majorCategory) {
+          q = q.eq('major_category', majorCategory);
+        } else if (targetDbCategories.length === 1) {
+          q = q.eq('flashcard_decks.practice_categories.name', targetDbCategories[0]);
+        } else {
+          q = q.in('flashcard_decks.practice_categories.name', targetDbCategories);
         }
-      } catch (netErr) {
-        console.warn('Network issue loading flashcards, falling back to cached state:', netErr);
-      }
+        return q;
+      };
+
+      const { items: loadedCards } = await loadPracticeItems({
+        cacheType: 'flashcard',
+        cacheScope: poolScope,
+        track: activeTrack,
+        buildQuery: buildBaseQuery,
+        matches: buildItemMatcher({
+          track: activeTrack,
+          section: activeSection,
+          targetDbCategories,
+          majorCategory,
+          minorCategory,
+          deckId,
+          getCategoryName: (it) => it?.flashcard_decks?.practice_categories?.name,
+        }),
+        limit,
+        subject,
+        majorCategory,
+        minorCategory,
+      });
 
       if (loadedCards.length === 0) {
         setError('No flashcards available. Connect to the internet once or try another topic.');

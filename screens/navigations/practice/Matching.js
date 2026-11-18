@@ -11,6 +11,7 @@ import { getCache, setCache } from '../../../utils/cache';
 import { enqueueSync } from '../../../utils/database';
 import NetInfo from '@react-native-community/netinfo';
 import { balancePracticeDistribution } from '../../../utils/practiceDistribution';
+import { loadPracticeItems, buildItemMatcher } from '../../../utils/practiceLoader';
 
 const NAVY = '#0B2540';
 const MATCH_DELAY = 450;
@@ -113,21 +114,11 @@ export default function Matching({ navigation, route }) {
       };
 
       const targetDbCategories = getDbCategories(subject);
-      const cacheKey = `matching_${track.toLowerCase()}_${(subject || 'all').toLowerCase()}_${(majorCategory || 'all').toLowerCase()}_${(minorCategory || 'all').toLowerCase()}`;
+      const poolScope = `${track.toLowerCase()}_${activeSection ? activeSection.replace(/\s+/g, '').toLowerCase() : 'all'}_pool`;
 
-      // Instant cached pairs load first
-      const cachedPairs = await getCache(cacheKey);
-      if (cachedPairs && Array.isArray(cachedPairs) && cachedPairs.length > 0) {
-        const shuffledCached = [...cachedPairs].sort(() => 0.5 - Math.random());
-        setPairs(shuffledCached);
-        setCards(buildCards(shuffledCached));
-        setLoading(false);
-      }
-
-      // Base query matching target exam and session
       const buildBaseQuery = () => {
         let q = supabase.from('matching_pairs')
-          .select('*, practice_categories!inner(name, exam_level)')
+          .select('*, practice_categories!inner(name, exam_level)', { count: 'exact' })
           .eq('is_published', true)
           .eq('exam_level', track);
 
@@ -147,28 +138,31 @@ export default function Matching({ navigation, route }) {
         return q;
       };
 
-      // Fetch up to 60 pairs to enable alternating round-robin distribution
-      const { data: rawData, error: qErr } = await buildBaseQuery().limit(60);
-      if (qErr) throw qErr;
+      const { items: loadedPairs } = await loadPracticeItems({
+        cacheType: 'matching',
+        cacheScope: poolScope,
+        track,
+        buildQuery: buildBaseQuery,
+        matches: buildItemMatcher({
+          track,
+          section: activeSection,
+          targetDbCategories,
+          majorCategory,
+          minorCategory,
+        }),
+        limit,
+        subject,
+        majorCategory,
+        minorCategory,
+      });
 
-      let rawPairs = rawData ? [...rawData] : [];
-
-      let loadedPairs = [];
-      if (rawPairs.length > 0) {
-        loadedPairs = balancePracticeDistribution(rawPairs, limit, subject, majorCategory, minorCategory);
-      }
-
-      if (loadedPairs.length === 0 && (!cachedPairs || cachedPairs.length === 0)) {
+      if (loadedPairs.length === 0) {
         setError('No matching pairs found for this configuration.');
         return;
       }
 
-      if (loadedPairs.length > 0) {
-        setCache(cacheKey, loadedPairs, 30 * 60 * 1000).catch(() => {});
-        const shuffledPairs = [...loadedPairs].sort(() => 0.5 - Math.random());
-        setPairs(shuffledPairs);
-        setCards(buildCards(shuffledPairs));
-      }
+      setPairs(loadedPairs);
+      setCards(buildCards(loadedPairs));
       setStartTime(Date.now());
     } catch (err) {
       console.error('Matching load error:', err);

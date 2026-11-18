@@ -17,6 +17,7 @@ import {
 } from '../../../utils/database';
 import { resolveUserTargetExam } from '../../../utils/targetExam';
 import { balancePracticeDistribution } from '../../../utils/practiceDistribution';
+import { loadPracticeItems, buildItemMatcher } from '../../../utils/practiceLoader';
 
 const NAVY = '#0B2540';
 
@@ -111,68 +112,55 @@ export default function TrueOrFalse({ navigation, route }) {
 
       const targetDbCategories = getDbCategories(subject);
 
-      const cacheScope = `${activeTrack.toLowerCase()}_${activeSection ? activeSection.replace(/\s+/g, '').toLowerCase() : 'all'}_${(subject || 'all').toLowerCase()}_${(majorCategory || 'all').toLowerCase()}_${(minorCategory || 'all').toLowerCase()}`;
+      // One canonical cache pool per track/section; filtering by subject happens on read.
+      const poolScope = `${activeTrack.toLowerCase()}_${activeSection ? activeSection.replace(/\s+/g, '').toLowerCase() : 'all'}_pool`;
 
-      let loadedQuestions = [];
+      const buildBaseQuery = () => {
+        let q = supabase.from('true_false_questions')
+          .select('*, practice_categories!inner(name, exam_level)', { count: 'exact' })
+          .eq('is_published', true)
+          .eq('exam_level', activeTrack);
 
-      // 1. Instant local SQLite cache lookup first (renders in under 50ms)
-      try {
-        const localQs = await getLocalQuestions('tf', cacheScope, 100);
-        if (localQs && localQs.length > 0) {
-          const balancedLocal = balancePracticeDistribution(localQs, limit, subject, majorCategory, minorCategory);
-          loadedQuestions = balancedLocal;
-          setQuestions(balancedLocal);
-          setLoading(false);
-        }
-      } catch (_) {}
-
-      // 2. Fetch fresh questions
-      try {
-        const buildBaseQuery = () => {
-          let q = supabase.from('true_false_questions')
-            .select('*, practice_categories!inner(name, exam_level)')
-            .eq('is_published', true)
-            .eq('exam_level', activeTrack);
-
-          if (activeTrack === 'FE' && activeSection) {
-            q = q.eq('fe_section', activeSection);
-          }
-
-          if (minorCategory) {
-            q = q.eq('minor_category', minorCategory);
-          } else if (majorCategory) {
-            q = q.eq('major_category', majorCategory);
-          } else if (targetDbCategories.length === 1) {
-            q = q.eq('practice_categories.name', targetDbCategories[0]);
-          } else {
-            q = q.in('practice_categories.name', targetDbCategories);
-          }
-          return q;
-        };
-
-        const { data: freshItems, error: qErr } = await buildBaseQuery().limit(100);
-        let freshQuestions = [];
-        if (!qErr && freshItems && freshItems.length > 0) {
-          freshQuestions = [...freshItems];
+        if (activeTrack === 'FE' && activeSection) {
+          q = q.eq('fe_section', activeSection);
         }
 
-        if (freshQuestions.length > 0) {
-          const balancedFresh = balancePracticeDistribution(freshQuestions, limit, subject, majorCategory, minorCategory);
-          loadedQuestions = balancedFresh;
-          setQuestions(balancedFresh);
-          cacheQuestionsLocally('tf', cacheScope, freshQuestions).catch(() => {});
+        if (minorCategory) {
+          q = q.eq('minor_category', minorCategory);
+        } else if (majorCategory) {
+          q = q.eq('major_category', majorCategory);
+        } else if (targetDbCategories.length === 1) {
+          q = q.eq('practice_categories.name', targetDbCategories[0]);
+        } else {
+          q = q.in('practice_categories.name', targetDbCategories);
         }
-      } catch (netErr) {
-        console.warn('Network issue loading TrueFalse, falling back to cached state:', netErr);
-      }
+        return q;
+      };
+
+      const { items: loadedQuestions } = await loadPracticeItems({
+        cacheType: 'tf',
+        cacheScope: poolScope,
+        track: activeTrack,
+        buildQuery: buildBaseQuery,
+        matches: buildItemMatcher({
+          track: activeTrack,
+          section: activeSection,
+          targetDbCategories,
+          majorCategory,
+          minorCategory,
+        }),
+        limit,
+        subject,
+        majorCategory,
+        minorCategory,
+      });
 
       if (loadedQuestions.length === 0) {
         setError('No questions available. Please check your connection or try another topic.');
         return;
       }
 
-      const shuffled = [...loadedQuestions].sort(() => 0.5 - Math.random());
-      setQuestions(shuffled);
+      setQuestions(loadedQuestions);
     } catch (err) {
       console.error('TrueFalse load error:', err);
       setError('Failed to load questions.');

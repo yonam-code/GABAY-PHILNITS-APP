@@ -478,11 +478,32 @@ export const cacheQuestionsLocally = async (examType, subject = 'all', questions
     })
 }
 
-export const getLocalQuestions = async (examType, subject = 'all', limit = 20) => {
+export const getLocalQuestions = async (examType, subject = 'all', limit = 20, opts = {}) => {
     try {
         return await safeDbOp(async (db) => {
             const cleanSub = (subject || 'all').toLowerCase()
             let rows = []
+
+            // Track-safe mode: only rows cached for the same exam track (e.g. "ip_..." vs "fe_..."),
+            // de-duplicated by question id. Callers then filter by subject/category themselves.
+            if (opts && opts.trackPrefix) {
+                const likePrefix = String(opts.trackPrefix).toLowerCase().replace(/([\\%_])/g, '\\$1') + '%'
+                const strictRows = await db.getAllAsync(
+                    "SELECT payload FROM local_questions_cache WHERE exam_type = ? AND subject LIKE ? ESCAPE '\\' ORDER BY (subject = ?) DESC, RANDOM() LIMIT ?",
+                    [examType, likePrefix, cleanSub, limit]
+                )
+                const seen = new Set()
+                const out = []
+                for (const r of strictRows) {
+                    try {
+                        const parsed = JSON.parse(r.payload)
+                        const key = parsed?.id ?? r.payload
+                        if (!seen.has(key)) { seen.add(key); out.push(parsed) }
+                    } catch (_) { }
+                }
+                return out
+            }
+
             if (cleanSub && cleanSub !== 'all') {
                 rows = await db.getAllAsync(
                     'SELECT payload FROM local_questions_cache WHERE exam_type = ? AND subject = ? ORDER BY RANDOM() LIMIT ?',

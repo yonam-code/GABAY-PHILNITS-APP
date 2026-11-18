@@ -123,8 +123,8 @@ const FE_AFTERNOON_SUBJECTS = [
   'Ensuring Information Security',
 ]
 
-const ITEM_COUNTS = [10, 20, 30, 40, 50]
-const SET_COUNTS = [1, 2, 3, 4, 5] // 1 set = 12 cards (6 pairs)
+const ITEM_COUNTS = [10, 20] // practice sessions are 10 or 20 items only
+const SET_COUNTS = [1, 2] // Matching: 1 set = 12 cards (6 pairs), 2 sets = 24 cards
 
 export default function PracticeOverview({ navigation, route }) {
   const insets = useSafeAreaInsets()
