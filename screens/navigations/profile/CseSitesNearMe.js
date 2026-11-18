@@ -126,8 +126,13 @@ function buildMapHtml(sites, user) {
     var nearest = SITES.slice().sort(function (a, b) {
       return Math.hypot(a.la - USER.la, a.lo - USER.lo) - Math.hypot(b.la - USER.la, b.lo - USER.lo);
     })[0];
-    map.setView([USER.la, USER.lo], 10);
-    if (nearest) map.fitBounds([[USER.la, USER.lo], [nearest.la, nearest.lo]], { padding: [40, 40], maxZoom: 13 });
+    var far = !nearest || Math.hypot(nearest.la - USER.la, nearest.lo - USER.lo) > 8; // > ~900 km away: show the venues instead
+    if (far && pts.length) {
+      map.fitBounds(pts, { padding: [30, 30] });
+    } else {
+      map.setView([USER.la, USER.lo], 10);
+      if (nearest) map.fitBounds([[USER.la, USER.lo], [nearest.la, nearest.lo]], { padding: [40, 40], maxZoom: 13 });
+    }
   } else if (pts.length) {
     map.fitBounds(pts, { padding: [30, 30] });
   } else {
@@ -330,7 +335,7 @@ export default function CseSitesNearMe({ navigation }) {
         <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Feather name="arrow-left" size={24} color={NAVY} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle} numberOfLines={1}>PhilNITS Testing Venues</Text>
+        <Text style={styles.headerTitle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>PhilNITS Testing Venues</Text>
         <View style={styles.placeholderBtn} />
       </View>
 
