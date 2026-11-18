@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { Modal, View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, Animated, Image, KeyboardAvoidingView, Platform, ActivityIndicator, ScrollView, StatusBar, Linking } from 'react-native'
+import { Modal, View, Text, TextInput, TouchableOpacity, Alert, StyleSheet, Animated, Image, Platform, ActivityIndicator, ScrollView, StatusBar, Linking } from 'react-native'
+import KeyboardAvoidingView from '../../components/KeyboardSafeView'
 import { Feather, Ionicons } from '@expo/vector-icons'
 import * as WebBrowser from 'expo-web-browser'
 import * as QueryParams from 'expo-auth-session'
-import { supabase } from '../../supabase'
+import { supabase } from '../../utils/supabase'
 import { sendEmailJsOtp } from '../../utils/emailjs'
 import { saveUserCache, saveUserSession } from '../../utils/database'
 

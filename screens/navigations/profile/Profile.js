@@ -7,6 +7,7 @@ import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as ImagePicker from 'expo-image-picker'
 import { supabase } from '../../../utils/supabase'
+import { writeOrQueue } from '../../../utils/queryHelper'
 import { clearUserSession } from '../../../utils/database'
 import { getCache, setCache, clearCache } from '../../../utils/cache'
 
@@ -136,12 +137,11 @@ export default function Profile({ session: initialSession, navigation }) {
         })
 
         // Update in users table asynchronously in background
-        const { error } = await supabase
-          .from('users')
-          .update({ avatar_url: base64Image })
-          .eq('email', user.email)
+        const { success, error } = await writeOrQueue(
+          'users', 'UPDATE', { avatar_url: base64Image }, { match: { email: user.email } }
+        )
 
-        if (error) {
+        if (!success) {
           Alert.alert('Upload Notice', error.message || 'Could not sync profile picture to server.')
         }
       }

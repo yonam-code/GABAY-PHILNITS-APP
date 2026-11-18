@@ -8,7 +8,7 @@ import { supabase } from '../../../utils/supabase'
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useFocusEffect } from '@react-navigation/native'
-import { getCache, setCache, clearCache } from '../../../utils/cache'
+import { getCache, getCacheMany, setCache, clearCache } from '../../../utils/cache'
 import { getUnsyncedPoints } from '../../../utils/database'
 import { resolveUserTargetExam } from '../../../utils/targetExam'
 import { getPHDateKey, getPHDateKeyOffset, utcToPHDateKey, getNextPhilNitsExamCycle } from '../../../utils/dateHelper'
@@ -22,6 +22,53 @@ import {
 } from '../../../utils/notificationManager'
 
 // ─── Fallback motivational quotes (used if API fails) ───────────
+// The readiness score and the subject-progress bars both need the user's most recent MCQ / True-False
+// results. Fetch them once (superset of both selects) and share the in-flight request for a short time.
+let recentResultsMemo = { uid: null, ts: 0, promise: null }
+const fetchRecentPracticeResults = (uid) => {
+  const now = Date.now()
+  if (recentResultsMemo.uid === uid && recentResultsMemo.promise && now - recentResultsMemo.ts < 20000) {
+    return recentResultsMemo.promise
+  }
+  const promise = Promise.allSettled([
+    supabase
+      .from('multiple_choice_results')
+      .select(`
+        is_correct,
+        question_id,
+        multiple_choice_questions (
+          category_id,
+          exam_level,
+          fe_section,
+          practice_categories (name, exam_level, fe_section)
+        )
+      `)
+      .eq('user_id', uid)
+      .order('answered_at', { ascending: false })
+      .limit(200),
+    supabase
+      .from('true_false_results')
+      .select(`
+        is_correct,
+        question_id,
+        true_false_questions (
+          category_id,
+          exam_level,
+          fe_section,
+          practice_categories (name, exam_level, fe_section)
+        )
+      `)
+      .eq('user_id', uid)
+      .order('answered_at', { ascending: false })
+      .limit(200),
+  ]).then(([m, t]) => ({
+    mcq: m.status === 'fulfilled' ? (m.value.data ?? []) : [],
+    tf: t.status === 'fulfilled' ? (t.value.data ?? []) : [],
+  }))
+  recentResultsMemo = { uid, ts: now, promise }
+  return promise
+}
+
 const FALLBACK_QUOTES = [
   { content: 'Success is the sum of small efforts repeated day in and day out.', author: 'Robert Collier' },
   { content: 'The secret of getting ahead is getting started.', author: 'Mark Twain' },
@@ -87,16 +134,24 @@ export default function Home({ session, navigation, route }) {
   // Immediately hydrate all home widgets from local cache on mount with zero network lag
   useEffect(() => {
     let isMounted = true
-    Promise.all([
-      getCache('home_streak_days'),
-      getCache('home_readiness'),
-      getCache('home_readiness_fe_a'),
-      getCache('home_readiness_fe_b'),
-      getCache('home_profile_name'),
-      getCache('home_cse_schedule'),
-      getCache('home_rankings'),
-      getCache('home_subject_progress'),
-    ]).then(([cachedStreak, cachedReadiness, cachedReadinessA, cachedReadinessB, cachedName, cachedCse, cachedRankings, cachedSubjects]) => {
+    getCacheMany([
+      'home_streak_days',
+      'home_readiness',
+      'home_readiness_fe_a',
+      'home_readiness_fe_b',
+      'home_profile_name',
+      'home_cse_schedule',
+      'home_rankings',
+      'home_subject_progress',
+    ]).then((c) => {
+      const cachedStreak = c.home_streak_days
+      const cachedReadiness = c.home_readiness
+      const cachedReadinessA = c.home_readiness_fe_a
+      const cachedReadinessB = c.home_readiness_fe_b
+      const cachedName = c.home_profile_name
+      const cachedCse = c.home_cse_schedule
+      const cachedRankings = c.home_rankings
+      const cachedSubjects = c.home_subject_progress
       if (!isMounted) return
       if (cachedStreak !== null && cachedStreak !== undefined) {
         setStreakDays(Number(cachedStreak))
@@ -393,9 +448,10 @@ export default function Home({ session, navigation, route }) {
   }, [])
 
   const fetchReadiness = useCallback(async () => {
-    const cached = await getCache('home_readiness')
-    const cachedA = await getCache('home_readiness_fe_a')
-    const cachedB = await getCache('home_readiness_fe_b')
+    const readinessCache = await getCacheMany(['home_readiness', 'home_readiness_fe_a', 'home_readiness_fe_b'])
+    const cached = readinessCache.home_readiness
+    const cachedA = readinessCache.home_readiness_fe_a
+    const cachedB = readinessCache.home_readiness_fe_b
     if (cached !== null && cached !== undefined) {
       setReadiness(Number(cached))
     }
@@ -427,36 +483,8 @@ export default function Home({ session, navigation, route }) {
           .eq('status', 'completed')
           .order('completed_at', { ascending: false })
           .limit(20),
-        supabase
-          .from('multiple_choice_results')
-          .select(`
-            is_correct,
-            question_id,
-            multiple_choice_questions (
-              category_id,
-              exam_level,
-              fe_section,
-              practice_categories (name, exam_level, fe_section)
-            )
-          `)
-          .eq('user_id', uid)
-          .order('answered_at', { ascending: false })
-          .limit(200),
-        supabase
-          .from('true_false_results')
-          .select(`
-            is_correct,
-            question_id,
-            true_false_questions (
-              category_id,
-              exam_level,
-              fe_section,
-              practice_categories (name, exam_level, fe_section)
-            )
-          `)
-          .eq('user_id', uid)
-          .order('answered_at', { ascending: false })
-          .limit(200),
+        fetchRecentPracticeResults(uid).then((r) => ({ data: r.mcq })),
+        fetchRecentPracticeResults(uid).then((r) => ({ data: r.tf })),
         supabase
           .from('matching_results')
           .select('id, pairs_matched, pairs_total, mistakes, set_title')
@@ -729,52 +757,44 @@ export default function Home({ session, navigation, route }) {
       }
 
       if (userIds.length > 0) {
-        // 1. Fetch real names from app_ratings (which stores user_id UUID -> user_name)
-        try {
-          const { data: ratingsData } = await supabase
-            .from('app_ratings')
-            .select('user_id, user_name')
-            .in('user_id', userIds)
+        // All three name sources are independent, so run them in parallel.
+        // Each one is bounded: no full-table downloads.
+        const numericIds = userIds.filter(id => !isNaN(Number(id)))
+        const myEmail = session?.user?.email
+        const [ratingsRes, ledgerRes, usersRes] = await Promise.allSettled([
+          // 1. app_ratings stores user_id UUID -> user_name
+          supabase.from('app_ratings').select('user_id, user_name').in('user_id', userIds).limit(100),
+          // 2. points_ledger metadata (recent rows only, just a fallback for names)
+          supabase.from('points_ledger').select('user_id, metadata').in('user_id', userIds)
+            .order('created_at', { ascending: false }).limit(Math.max(60, userIds.length * 4)),
+          // 3. users table: numeric ids if present, otherwise just the current user's own row
+          numericIds.length > 0
+            ? supabase.from('users').select('id, fullname, email').in('id', numericIds)
+            : (myEmail
+              ? supabase.from('users').select('id, fullname, email').eq('email', myEmail)
+              : Promise.resolve({ data: [] })),
+        ])
 
-          if (ratingsData) {
-            ratingsData.forEach(r => {
-              if (r.user_id && r.user_name) {
-                nameMap[r.user_id] = extractFirstName(r.user_name)
-              }
-            })
-          }
-        } catch (e) {
-          console.warn('Error fetching names from app_ratings:', e)
+        const ratingsData = ratingsRes.status === 'fulfilled' ? ratingsRes.value.data : null
+        if (ratingsData) {
+          ratingsData.forEach(r => {
+            if (r.user_id && r.user_name) {
+              nameMap[r.user_id] = extractFirstName(r.user_name)
+            }
+          })
         }
 
-        // 2. Fetch real names from points_ledger metadata
-        try {
-          const { data: ledgerMeta } = await supabase
-            .from('points_ledger')
-            .select('user_id, metadata')
-            .in('user_id', userIds)
-
-          if (ledgerMeta) {
-            ledgerMeta.forEach(row => {
-              if (row.user_id && !nameMap[row.user_id] && row.metadata?.user_name) {
-                nameMap[row.user_id] = extractFirstName(row.metadata.user_name)
-              }
-            })
-          }
-        } catch (e) {
-          console.warn('Error fetching names from points_ledger metadata:', e)
+        const ledgerMeta = ledgerRes.status === 'fulfilled' ? ledgerRes.value.data : null
+        if (ledgerMeta) {
+          ledgerMeta.forEach(row => {
+            if (row.user_id && !nameMap[row.user_id] && row.metadata?.user_name) {
+              nameMap[row.user_id] = extractFirstName(row.metadata.user_name)
+            }
+          })
         }
 
-        // 3. Query users table (only filter on numeric IDs if present to avoid bigint syntax error, and match current user by email)
         try {
-          const numericIds = userIds.filter(id => !isNaN(Number(id)))
-          let usersQuery = supabase.from('users').select('id, fullname, email')
-          if (numericIds.length > 0) {
-            usersQuery = usersQuery.in('id', numericIds)
-          }
-
-          const { data: usersData } = await usersQuery
-
+          const usersData = usersRes.status === 'fulfilled' ? usersRes.value.data : null
           if (usersData) {
             usersData.forEach(u => {
               const uFirst = extractFirstName(u.fullname, u.email)
@@ -893,9 +913,10 @@ export default function Home({ session, navigation, route }) {
   }, [])
 
   const fetchHomeData = useCallback(async () => {
-    const cachedName = await getCache('home_profile_name')
-    const cachedStreak = await getCache('home_streak_days')
-    const cachedSubjects = await getCache('home_subject_progress')
+    const homeCache = await getCacheMany(['home_profile_name', 'home_streak_days', 'home_subject_progress'])
+    const cachedName = homeCache.home_profile_name
+    const cachedStreak = homeCache.home_streak_days
+    const cachedSubjects = homeCache.home_subject_progress
 
     if (cachedStreak !== null && cachedStreak !== undefined) {
       setStreakDays(Number(cachedStreak))
@@ -931,13 +952,15 @@ export default function Home({ session, navigation, route }) {
       await setCache('home_profile_name', resolvedName)
 
       // 2. Fetch activity & login streak across activities + daily logins
+      // The streak only looks back 60 days, so never download older history
+      const streakSince = new Date(Date.now() - 63 * 24 * 60 * 60 * 1000).toISOString()
       const [sesRes, mcqRes, tfRes, matchRes, mockRes, streakRes] = await Promise.allSettled([
-        supabase.from('flashcard_sessions').select('created_at, completed_at, started_at').eq('user_id', uid),
-        supabase.from('multiple_choice_results').select('answered_at').eq('user_id', uid),
-        supabase.from('true_false_results').select('answered_at').eq('user_id', uid),
-        supabase.from('matching_results').select('created_at, completed_at').eq('user_id', uid),
-        supabase.from('mock_exam_attempts').select('created_at, completed_at, started_at').eq('user_id', uid),
-        supabase.from('points_ledger').select('created_at, metadata').eq('user_id', uid).eq('category', 'streak'),
+        supabase.from('flashcard_sessions').select('created_at, completed_at, started_at').eq('user_id', uid).gte('created_at', streakSince).limit(1000),
+        supabase.from('multiple_choice_results').select('answered_at').eq('user_id', uid).gte('answered_at', streakSince).limit(2000),
+        supabase.from('true_false_results').select('answered_at').eq('user_id', uid).gte('answered_at', streakSince).limit(2000),
+        supabase.from('matching_results').select('created_at, completed_at').eq('user_id', uid).gte('created_at', streakSince).limit(1000),
+        supabase.from('mock_exam_attempts').select('created_at, completed_at, started_at').eq('user_id', uid).gte('created_at', streakSince).limit(500),
+        supabase.from('points_ledger').select('created_at, metadata').eq('user_id', uid).eq('category', 'streak').gte('created_at', streakSince).limit(100),
       ])
 
       const ses = sesRes.status === 'fulfilled' ? (sesRes.value.data ?? []) : []
@@ -990,41 +1013,10 @@ export default function Home({ session, navigation, route }) {
       const targetDefaultSubjects = isFE ? FE_DEFAULT_SUBJECTS : IP_DEFAULT_SUBJECTS
 
       // 4. Fetch MCQ + TF results strictly isolated to user's target exam (bounded to most recent 200 items)
-      const { data: mcqPerformance } = await supabase
-        .from('multiple_choice_results')
-        .select(`
-          is_correct,
-          multiple_choice_questions (
-            exam_level,
-            fe_section,
-            practice_categories (
-              name,
-              exam_level,
-              fe_section
-            )
-          )
-        `)
-        .eq('user_id', uid)
-        .order('answered_at', { ascending: false })
-        .limit(200)
-
-      const { data: tfPerformance } = await supabase
-        .from('true_false_results')
-        .select(`
-          is_correct,
-          true_false_questions (
-            exam_level,
-            fe_section,
-            practice_categories (
-              name,
-              exam_level,
-              fe_section
-            )
-          )
-        `)
-        .eq('user_id', uid)
-        .order('answered_at', { ascending: false })
-        .limit(200)
+      // Same data the readiness score uses: fetched once and shared (see fetchRecentPracticeResults)
+      const recentResults = await fetchRecentPracticeResults(uid)
+      const mcqPerformance = recentResults.mcq
+      const tfPerformance = recentResults.tf
 
       const performanceMap = {}
       targetDefaultSubjects.forEach(s => {
@@ -1091,6 +1083,8 @@ export default function Home({ session, navigation, route }) {
 
   // Fetch CSE schedule & readiness on mount
   useEffect(() => {
+    // Mark as just-fetched so the first focus event below doesn't repeat all of these requests
+    lastFocusFetchTimeRef.current = Date.now()
     fetchCSESchedule()
     fetchReadiness()
     fetchRankings()
@@ -1102,13 +1096,18 @@ export default function Home({ session, navigation, route }) {
   useFocusEffect(
     useCallback(() => {
       // Immediately hydrate cached profile, streak, readiness, and subjects on screen focus with zero lag
-      Promise.all([
-        getCache('home_streak_days'),
-        getCache('home_readiness'),
-        getCache('home_profile_name'),
-        getCache('home_subject_progress'),
-        getCache('home_rankings'),
-      ]).then(([cachedStreak, cachedReadiness, cachedName, cachedSubjects, cachedRankings]) => {
+      getCacheMany([
+        'home_streak_days',
+        'home_readiness',
+        'home_profile_name',
+        'home_subject_progress',
+        'home_rankings',
+      ]).then((c) => {
+        const cachedStreak = c.home_streak_days
+        const cachedReadiness = c.home_readiness
+        const cachedName = c.home_profile_name
+        const cachedSubjects = c.home_subject_progress
+        const cachedRankings = c.home_rankings
         if (cachedStreak !== null && cachedStreak !== undefined) {
           setStreakDays(Number(cachedStreak))
         }
@@ -1144,6 +1143,7 @@ export default function Home({ session, navigation, route }) {
   // ─── Pull-to-refresh ───────────────────────────────────────────
   const onRefresh = useCallback(async () => {
     setRefreshing(true)
+    recentResultsMemo = { uid: null, ts: 0, promise: null }
     // Clear cache first on pull-to-refresh to ensure loading live data
     await clearCache('home_cse_schedule')
     await clearCache('home_readiness')

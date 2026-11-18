@@ -4,7 +4,7 @@ import {
   TouchableOpacity, StatusBar, Platform, ActivityIndicator } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
 import { SkeletonItem } from '../../../components/Skeleton'
 import { withTimeout } from '../../../utils/queryHelper'
 import { getScrollBottomPadding } from '../../../utils/responsiveLayout'

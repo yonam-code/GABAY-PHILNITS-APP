@@ -6,7 +6,9 @@ import {
 import { Ionicons, Feather } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { WebView } from 'react-native-webview'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
+import { getCache, setCache } from '../../../utils/cache'
+import { withTimeout, writeOrQueue } from '../../../utils/queryHelper'
 import { SkeletonItem } from '../../../components/Skeleton'
 import { calculateReadingPoints, recordPointsEntry } from '../../../utils/pointsEngine'
 
@@ -191,14 +193,30 @@ export default function ReadingMaterial({ navigation, route }) {
         const { data: { session } } = await supabase.auth.getSession()
         const uid = session?.user?.id
 
-        // Fetch material record strictly from Supabase
-        const { data: matData, error: matErr } = await supabase
-          .from('reading_materials')
-          .select('*')
-          .eq('id', materialId)
-          .maybeSingle()
+        // Show cached material instantly (works offline), then refresh from Supabase
+        const matCacheKey = `reading_material_${materialId}`
+        const cachedMat = await getCache(matCacheKey)
+        if (cachedMat) {
+          setMaterialMeta(cachedMat)
+          const cachedPdf = cachedMat.pdf_url || cachedMat.file_url || cachedMat.url || incomingPdfUrl
+          if (cachedPdf) setPdfUrl(cachedPdf)
+        }
+
+        let matData = null
+        let matErr = null
+        try {
+          const matRes = await withTimeout(
+            supabase.from('reading_materials').select('*').eq('id', materialId).maybeSingle(),
+            8000
+          )
+          matData = matRes?.data
+          matErr = matRes?.error
+        } catch (e) {
+          matErr = e
+        }
 
         if (!matErr && matData) {
+          setCache(matCacheKey, matData, 24 * 60 * 60 * 1000).catch(() => {})
           setMaterialMeta(matData)
           const targetPdf = matData.pdf_url || matData.file_url || matData.url || incomingPdfUrl
           if (targetPdf) setPdfUrl(targetPdf)
@@ -206,24 +224,36 @@ export default function ReadingMaterial({ navigation, route }) {
 
         // Fetch read progress
         if (uid) {
-          const { data: progData } = await supabase
-            .from('user_reading_progress')
-            .select('*')
-            .eq('user_id', uid)
-            .eq('reading_material_id', materialId)
-            .maybeSingle()
+          const progCacheKey = `reading_progress_${uid}_${materialId}`
+          const cachedProg = await getCache(progCacheKey)
+          if (cachedProg) setHasRead(Boolean(cachedProg.is_completed))
+
+          let progData = null
+          try {
+            const progRes = await withTimeout(
+              supabase
+                .from('user_reading_progress')
+                .select('*')
+                .eq('user_id', uid)
+                .eq('reading_material_id', materialId)
+                .maybeSingle(),
+              8000
+            )
+            progData = progRes?.data
+          } catch (_) {}
 
           if (progData) {
             setHasRead(Boolean(progData.is_completed))
+            setCache(progCacheKey, progData, 30 * 24 * 60 * 60 * 1000).catch(() => {})
           }
 
-          // Register initial progress
-          await supabase.from('user_reading_progress').upsert({
+          // Register initial progress (queued for later sync if offline)
+          writeOrQueue('user_reading_progress', 'UPSERT', {
             user_id: uid,
             reading_material_id: materialId,
             current_chapter_number: 1,
             updated_at: new Date().toISOString(),
-          }, { onConflict: 'user_id,reading_material_id' })
+          }, { onConflict: 'user_id,reading_material_id' }).catch(() => {})
         }
       } catch (err) {
         console.warn('Error loading reading material:', err)
@@ -244,7 +274,8 @@ export default function ReadingMaterial({ navigation, route }) {
       const { data: { session } } = await supabase.auth.getSession()
       const uid = session?.user?.id
       if (uid) {
-        const { error } = await supabase.from('user_reading_progress').upsert({
+        setCache(`reading_progress_${uid}_${materialId}`, { is_completed: nextCompleted }, 30 * 24 * 60 * 60 * 1000).catch(() => {})
+        const { success, error } = await writeOrQueue('user_reading_progress', 'UPSERT', {
           user_id: uid,
           reading_material_id: materialId,
           current_chapter_number: 1,
@@ -252,8 +283,8 @@ export default function ReadingMaterial({ navigation, route }) {
           updated_at: new Date().toISOString(),
         }, { onConflict: 'user_id,reading_material_id' })
 
-        if (error) {
-          console.error('Error saving read status:', error.message)
+        if (!success) {
+          console.error('Error saving read status:', error?.message || error)
         }
 
         if (nextCompleted) {

@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
 import { SkeletonItem } from '../../../components/Skeleton'
 import { getCache, setCache, clearCache } from '../../../utils/cache'
 import { withTimeout } from '../../../utils/queryHelper'

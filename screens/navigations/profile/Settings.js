@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react'
 import {
-  ActivityIndicator, Alert, Animated, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StatusBar,
-  StyleSheet, Switch, Text, TextInput, TouchableOpacity, View,
+  ActivityIndicator, Alert, Animated, Keyboard, Modal, Platform, ScrollView, StatusBar,
+  StyleSheet, Switch, Text, TextInput, TouchableOpacity, View
 } from 'react-native'
+import KeyboardAvoidingView from '../../../components/KeyboardSafeView'
 import { Feather } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { supabase } from '../../../utils/supabase'
@@ -432,7 +433,7 @@ export default function Settings({ navigation }) {
       </Modal>
 
       {/* ── Change Password Modal ── */}
-      <Modal
+      <Modal statusBarTranslucent navigationBarTranslucent
         visible={pwModalOpen}
         transparent
         animationType="slide"
@@ -580,7 +581,7 @@ export default function Settings({ navigation }) {
       </Modal>
 
       {/* ── PIN Email Verification Modal ── */}
-      <Modal
+      <Modal statusBarTranslucent navigationBarTranslucent
         visible={pinAuthModalOpen}
         transparent
         animationType="fade"

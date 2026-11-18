@@ -1,7 +1,7 @@
-import { supabase } from '../supabase'
+import { supabase } from './supabase'
 import { getCache, setCache } from './cache'
 import { getActiveUserSession, saveUserSession } from './database'
-import { withTimeout } from './queryHelper'
+import { writeOrQueue } from './queryHelper'
 
 /**
  * Standardize any exam level string into 'FE' | 'IP'
@@ -133,16 +133,13 @@ export async function setUserTargetExamTrack(track, user = null) {
     if (currentUser?.id) {
       await saveUserSession(currentUser, { target_exam_level: fullLevelText })
       // 4. Update Supabase personal_info
-      withTimeout(
-        supabase
-          .from('personal_info')
-          .upsert({
-            user_id: currentUser.id,
-            target_exam_level: fullLevelText,
-            updated_at: new Date().toISOString(),
-          }, { onConflict: 'user_id' }),
-        8000
-      ).catch((err) => {
+      writeOrQueue('personal_info', 'UPSERT', {
+        user_id: currentUser.id,
+        target_exam_level: fullLevelText,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id' }).then((res) => {
+        if (!res.success) console.warn('Background personal_info update notice:', res.error)
+      }).catch((err) => {
         console.warn('Background personal_info update notice:', err)
       })
     }

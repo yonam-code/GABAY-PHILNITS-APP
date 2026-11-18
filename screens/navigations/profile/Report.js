@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react'
 import {
-  ActivityIndicator, Alert, Image, Keyboard, KeyboardAvoidingView, Platform,
-  ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  ActivityIndicator, Alert, Image, Keyboard, Platform,
+  ScrollView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View
 } from 'react-native'
+import KeyboardAvoidingView from '../../../components/KeyboardSafeView'
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import * as ImagePicker from 'expo-image-picker'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
+import { withTimeout } from '../../../utils/queryHelper'
+import { isNetworkError, processSyncQueue } from '../../../utils/syncManager'
+import { enqueueSync } from '../../../utils/database'
 
 const NAVY = '#0f2747'
 const BLUE = '#2563eb'
@@ -143,14 +147,21 @@ export default function Report({ navigation }) {
         status: 'pending',
       }
 
-      const { data, error } = await supabase
-        .from('user_reports')
-        .insert(newReport)
-        .select()
-        .single()
-
-      if (error) {
-        throw error
+      let data = null
+      try {
+        const resp = await withTimeout(
+          supabase.from('user_reports').insert(newReport).select().single(),
+          10000
+        )
+        if (resp.error) throw resp.error
+        data = resp.data
+      } catch (sendErr) {
+        if (!isNetworkError(sendErr)) throw sendErr
+        // Offline / bad connection: keep the report locally and send it automatically later
+        const queuedId = await enqueueSync('user_reports', 'INSERT', newReport)
+        if (queuedId === null || queuedId === undefined) throw sendErr
+        data = { ...newReport, id: `local_${Date.now()}`, created_at: new Date().toISOString() }
+        processSyncQueue().catch(() => {})
       }
 
       setTitle('')

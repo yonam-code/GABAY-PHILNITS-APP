@@ -1,6 +1,7 @@
 import NetInfo from '@react-native-community/netinfo'
 import { getCache, setCache } from './cache'
 import { enqueueSync } from './database'
+import { runQueueItem, isNetworkError, processSyncQueue } from './syncManager'
 
 /**
  * Executes a promise with an automatic timeout (default 8 seconds).
@@ -77,6 +78,56 @@ export async function safeQuery(queryPromiseFn, options = {}) {
     return { data: fallback, error: err, fromCache: false }
   }
 }
+
+/**
+ * Offline-first write: tries Supabase when online, otherwise (or on a network failure) stores the
+ * operation in the SQLite sync queue so it is replayed automatically when connectivity returns.
+ *
+ * - A real server rejection (validation / RLS / constraint) is NOT queued; it is returned as { success:false, error }.
+ * - options.onConflict : column(s) for UPSERT conflict resolution (kept with the queued item)
+ * - options.match      : { column: value } filter for UPDATE/DELETE (kept with the queued item)
+ *
+ * @returns {Promise<{success: boolean, queued: boolean, error?: any}>}
+ */
+export async function writeOrQueue(tableName, action, payload, options = {}) {
+  const { onConflict, match, timeoutMs = 8000 } = options
+  const queueOptions = (onConflict || match) ? { onConflict, match } : null
+  const item = { table_name: tableName, action }
+
+  let online = true
+  try {
+    const net = await NetInfo.fetch()
+    online = Boolean(net.isConnected)
+  } catch (_) {}
+
+  if (online) {
+    try {
+      const result = await withTimeout(runQueueItem(item, payload, queueOptions), timeoutMs)
+      if (result?.error) {
+        if (!isNetworkError(result.error)) {
+          return { success: false, queued: false, error: result.error }
+        }
+        // network-level error: fall through to queue
+      } else {
+        return { success: true, queued: false }
+      }
+    } catch (err) {
+      // Timeout / thrown network failure: fall through to queue. Anything else is a real error.
+      if (!isNetworkError(err)) {
+        return { success: false, queued: false, error: err }
+      }
+    }
+  }
+
+  const id = await enqueueSync(tableName, action, payload, queueOptions)
+  if (id === null || id === undefined) {
+    return { success: false, queued: false, error: new Error('Could not save change for later sync') }
+  }
+  return { success: true, queued: true }
+}
+
+/** Kick off a background sync without blocking the UI. */
+export const syncSoon = () => { processSyncQueue().catch(() => {}) }
 
 /**
  * Resilient mutation wrapper (Insert, Update, Upsert, Delete):

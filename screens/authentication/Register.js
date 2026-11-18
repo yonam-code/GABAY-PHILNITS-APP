@@ -9,12 +9,12 @@ import {
   Alert,
   StyleSheet,
   ActivityIndicator,
-  KeyboardAvoidingView,
   Platform,
   Animated,
   Image,
-  StatusBar,
+  StatusBar
 } from 'react-native'
+import KeyboardAvoidingView from '../../components/KeyboardSafeView'
 import { Feather, Ionicons } from '@expo/vector-icons'
 import { supabase } from '../../utils/supabase'
 import { sendEmailJsOtp } from '../../utils/emailjs'

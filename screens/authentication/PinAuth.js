@@ -2,7 +2,6 @@ import React, { useRef, useState, useEffect } from 'react'
 import {
   Animated,
   Keyboard,
-  KeyboardAvoidingView,
   Platform,
   StatusBar,
   StyleSheet,
@@ -13,8 +12,9 @@ import {
   Image,
   Alert,
   Modal,
-  TextInput,
+  TextInput
 } from 'react-native'
+import KeyboardAvoidingView from '../../components/KeyboardSafeView'
 import { Feather } from '@expo/vector-icons'
 import { supabase } from '../../utils/supabase'
 import { getUserCache, saveUserCache, getActiveUserSession, clearUserSession } from '../../utils/database'
@@ -447,7 +447,7 @@ export default function PinAuth({ navigation }) {
       </View>
 
       {/* ── Forgot PIN Modal ── */}
-      <Modal
+      <Modal statusBarTranslucent navigationBarTranslucent
         visible={forgotModalVisible}
         transparent
         animationType="slide"

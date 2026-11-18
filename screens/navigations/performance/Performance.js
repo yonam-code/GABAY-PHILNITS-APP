@@ -6,7 +6,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Ionicons, Feather, MaterialCommunityIcons } from '@expo/vector-icons'
 import Svg, { Circle, Line, Polygon, Path, Text as SvgText, TSpan, G } from 'react-native-svg'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
 import { SkeletonItem } from '../../../components/Skeleton'
 import { withTimeout } from '../../../utils/queryHelper'
 import { getScrollBottomPadding } from '../../../utils/responsiveLayout'

@@ -6,7 +6,7 @@ import {
 } from 'react-native'
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import MaterialCommunityIcons from '@expo/vector-icons/MaterialCommunityIcons'
-import { supabase } from '../../supabase'
+import { supabase } from '../../utils/supabase'
 import { setCache } from '../../utils/cache'
 import { saveUserCache } from '../../utils/database'
 import { setUserTargetExamTrack } from '../../utils/targetExam'

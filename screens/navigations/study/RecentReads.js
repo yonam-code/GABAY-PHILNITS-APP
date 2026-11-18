@@ -11,7 +11,7 @@ import {
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
 
 const NAVY = '#13294b'
 const LIGHT_BG = '#f8fafc'

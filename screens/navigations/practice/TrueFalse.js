@@ -6,7 +6,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
-import { supabase } from '../../../supabase';
+import { supabase } from '../../../utils/supabase';
 import { SkeletonItem } from '../../../components/Skeleton';
 import { getCache, setCache } from '../../../utils/cache';
 import {

@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { supabase } from '../../../supabase';
+import { supabase } from '../../../utils/supabase';
 import { resolveUserTargetExam } from '../../../utils/targetExam';
 import { getCache, setCache } from '../../../utils/cache';
 import { enqueueSync } from '../../../utils/database';

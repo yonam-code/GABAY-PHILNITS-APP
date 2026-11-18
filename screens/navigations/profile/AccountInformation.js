@@ -1,11 +1,14 @@
 import React, { useState } from 'react'
 import {
-  Alert, Image, KeyboardAvoidingView, Modal, Platform, ScrollView, StatusBar,
+  Alert, Image, Modal, Platform, ScrollView, StatusBar,
   StyleSheet, Text, TextInput, TouchableOpacity, View, ActivityIndicator
 } from 'react-native'
+import KeyboardAvoidingView from '../../../components/KeyboardSafeView'
 import { Feather, Ionicons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { supabase } from '../../../utils/supabase'
+import { withTimeout, writeOrQueue } from '../../../utils/queryHelper'
+import { isNetworkError } from '../../../utils/syncManager'
 import { getActiveUserSession, saveUserSession } from '../../../utils/database'
 import { getCache, setCache } from '../../../utils/cache'
 import { setUserTargetExamTrack } from '../../../utils/targetExam'
@@ -473,10 +476,23 @@ export default function AccountInformation({ route, navigation }) {
         updated_at: new Date().toISOString(),
       }
 
-      let { data: savedInfo, error: infoError } = await supabase
-        .from('personal_info')
-        .upsert(infoPayload, { onConflict: 'user_id' })
-        .select()
+      let savedInfo = null
+      let infoError = null
+      try {
+        const infoRes = await withTimeout(
+          supabase.from('personal_info').upsert(infoPayload, { onConflict: 'user_id' }).select(),
+          10000
+        )
+        savedInfo = infoRes?.data
+        infoError = infoRes?.error
+      } catch (sendErr) {
+        infoError = sendErr
+      }
+      // No connection: save the change locally and sync it automatically when back online
+      if (infoError && isNetworkError(infoError)) {
+        const queued = await writeOrQueue('personal_info', 'UPSERT', infoPayload, { onConflict: 'user_id' })
+        infoError = queued.success ? null : (queued.error || infoError)
+      }
 
       if (infoError) {
         const errDetail = String(infoError.message || '') + ' ' + String(infoError.details || '')
@@ -504,10 +520,7 @@ export default function AccountInformation({ route, navigation }) {
 
       // 3. Keep public.users in sync (non-blocking)
       try {
-        await supabase
-          .from('users')
-          .update({ fullname: fullName.trim() })
-          .eq('email', currentAuthUser.email)
+        await writeOrQueue('users', 'UPDATE', { fullname: fullName.trim() }, { match: { email: currentAuthUser.email } })
       } catch (uErr) {
         console.warn('Note: public.users update skipped/failed:', uErr)
       }

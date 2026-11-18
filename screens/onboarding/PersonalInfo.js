@@ -7,12 +7,12 @@ import {
   TouchableOpacity,
   View,
   ScrollView,
-  KeyboardAvoidingView,
   Platform,
   Image,
   Modal,
-  StatusBar,
+  StatusBar
 } from 'react-native'
+import KeyboardAvoidingView from '../../components/KeyboardSafeView'
 import { Ionicons } from '@expo/vector-icons'
 import { Calendar } from 'react-native-calendars'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'

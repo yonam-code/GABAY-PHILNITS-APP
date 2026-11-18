@@ -8,7 +8,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import NetInfo from '@react-native-community/netinfo';
-import { supabase } from '../../../supabase';
+import { supabase } from '../../../utils/supabase';
 import { getModalBottomPadding } from '../../../utils/responsiveLayout';
 import {
   getActiveUserSession,
@@ -17,6 +17,7 @@ import {
   enqueueSync,
 } from '../../../utils/database';
 import { resolveUserTargetExam } from '../../../utils/targetExam';
+import { processSyncQueue } from '../../../utils/syncManager';
 import { getCache, setCache } from '../../../utils/cache';
 import { balancePracticeDistribution } from '../../../utils/practiceDistribution';
 
@@ -45,6 +46,8 @@ export default function Flashcards({ navigation, route }) {
   const [loading,   setLoading]   = useState(true);
   const [error,     setError]     = useState(null);
   const [sessionId, setSessionId] = useState(null);
+  // Session that couldn't be created on the server (offline). It is queued as ONE complete INSERT when finished.
+  const pendingSessionRef = useRef(null);
   const [userId,    setUserId]    = useState(null);
   const [startTime, setStartTime] = useState(null);
   const [completed, setCompleted] = useState(false);
@@ -332,10 +335,10 @@ export default function Flashcards({ navigation, route }) {
               .select().single();
             if (sess) setSessionId(sess.id);
           } catch (_) {
-            enqueueSync('flashcard_sessions', 'INSERT', payload);
+            pendingSessionRef.current = { ...payload };
           }
         } else {
-          enqueueSync('flashcard_sessions', 'INSERT', payload);
+          pendingSessionRef.current = { ...payload };
         }
       }
       setStartTime(Date.now());
@@ -348,11 +351,24 @@ export default function Flashcards({ navigation, route }) {
   };
 
   const updateSession = async (seen, completed = false) => {
-    if (!sessionId) return;
     const payload = { cards_seen: seen, completed };
     if (completed) {
       payload.completed_at = new Date().toISOString();
       payload.duration_seconds = startTime ? Math.round((Date.now() - startTime) / 1000) : null;
+    }
+
+    // Offline-created session: keep progress locally, then queue a single full INSERT on completion
+    if (!sessionId) {
+      if (pendingSessionRef.current) {
+        pendingSessionRef.current = { ...pendingSessionRef.current, ...payload };
+        if (completed) {
+          const full = pendingSessionRef.current;
+          pendingSessionRef.current = null;
+          await enqueueSync('flashcard_sessions', 'INSERT', full);
+          processSyncQueue().catch(() => {});
+        }
+      }
+      return;
     }
 
     try {

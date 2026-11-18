@@ -8,11 +8,17 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImageManipulator from 'expo-image-manipulator';
-import * as tf from '@tensorflow/tfjs';
-import '@tensorflow/tfjs-react-native';
-import { decodeJpeg } from '@tensorflow/tfjs-react-native';
-import * as blazeface from '@tensorflow-models/blazeface';
-import { supabase } from '../../../supabase';
+// TensorFlow is heavy; it is loaded lazily (see loadTensorFlow) so it doesn't slow down app startup.
+let tfModules = null;
+const loadTensorFlow = async () => {
+  if (tfModules) return tfModules;
+  const tf = require('@tensorflow/tfjs');
+  const tfrn = require('@tensorflow/tfjs-react-native');
+  const blazeface = require('@tensorflow-models/blazeface');
+  tfModules = { tf, decodeJpeg: tfrn.decodeJpeg, blazeface };
+  return tfModules;
+};
+import { supabase } from '../../../utils/supabase';
 import { calculateMockExamPoints, recordPointsEntry } from '../../../utils/pointsEngine';
 import NetInfo from '@react-native-community/netinfo';
 import { getActiveUserSession, enqueueSync } from '../../../utils/database';
@@ -143,6 +149,7 @@ export default function MockExamTake({ navigation, route }) {
             { compress: 0.35, format: ImageManipulator.SaveFormat.JPEG, base64: true }
           );
 
+          const { tf, decodeJpeg } = tfModules;
           const imgBuffer = tf.util.encodeString(manipResult.base64, 'base64').buffer;
           const raw = new Uint8Array(imgBuffer);
           const imageTensor = decodeJpeg(raw);
@@ -246,6 +253,7 @@ export default function MockExamTake({ navigation, route }) {
   useEffect(() => {
     const initTF = async () => {
       try {
+        const { tf, blazeface } = await loadTensorFlow();
         await tf.ready();
         modelRef.current = await blazeface.load();
         setTfReady(true);

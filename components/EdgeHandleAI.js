@@ -13,12 +13,12 @@ import {
   TextInput,
   TouchableOpacity,
   View,
-  KeyboardAvoidingView,
 } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { Feather, Ionicons, MaterialCommunityIcons } from '@expo/vector-icons'
 import { supabase } from '../utils/supabase'
+import KeyboardSafeView from './KeyboardSafeView'
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window')
 const NAVY = '#0f2747'
@@ -553,6 +553,8 @@ Guidelines for answers:
         visible={panelOpen}
         transparent
         animationType="none"
+        statusBarTranslucent
+        navigationBarTranslucent
         onRequestClose={closePanel}
       >
         <View style={styles.modalOverlay}>
@@ -569,15 +571,13 @@ Guidelines for answers:
               styles.panelContainer,
               {
                 transform: [{ translateX: slideAnim }],
-                paddingBottom: Platform.OS === 'android'
-                  ? (isKeyboardActive ? Math.max(keyboardHeight, 8) : Math.max(insets.bottom, 16))
-                  : (isKeyboardActive ? 8 : Math.max(insets.bottom, 16)),
               },
             ]}
           >
-            <KeyboardAvoidingView
+            {/* Lifts the input bar above the keyboard (Android edge-to-edge safe) */}
+            <KeyboardSafeView
               style={{ flex: 1 }}
-              behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+              idlePaddingBottom={Math.max(insets.bottom, 16)}
             >
               {/* Header */}
               <View style={styles.panelHeader}>
@@ -673,6 +673,10 @@ Guidelines for answers:
                   onChangeText={setInputText}
                   onSubmitEditing={() => handleSendMessage()}
                   returnKeyType="send"
+                  multiline
+                  submitBehavior="submit"
+                  textAlignVertical="center"
+                  selectionColor="#0B2540"
                 />
                 <TouchableOpacity
                   style={[styles.sendBtn, !inputText.trim() && styles.sendBtnDisabled]}
@@ -683,7 +687,7 @@ Guidelines for answers:
                   <Ionicons name="send" size={18} color="#fff" />
                 </TouchableOpacity>
               </View>
-            </KeyboardAvoidingView>
+            </KeyboardSafeView>
           </Animated.View>
         </View>
       </Modal>

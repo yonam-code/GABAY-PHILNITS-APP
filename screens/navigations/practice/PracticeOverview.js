@@ -5,7 +5,7 @@ import {
 } from 'react-native'
 import { Feather, Ionicons } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { supabase } from '../../../supabase'
+import { supabase } from '../../../utils/supabase'
 import { getCache, setCache } from '../../../utils/cache'
 import { resolveUserTargetExam } from '../../../utils/targetExam'
 import { getModalBottomPadding } from '../../../utils/responsiveLayout'

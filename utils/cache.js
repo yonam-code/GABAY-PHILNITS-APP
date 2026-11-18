@@ -1,4 +1,4 @@
-import { getGenericCache, setGenericCache, clearGenericCache } from './database'
+import { getGenericCache, getGenericCacheMany, setGenericCache, clearGenericCache } from './database'
 
 /**
  * Get an item from the SQLite cache. Returns null if not found or expired.
@@ -17,6 +17,19 @@ export async function getCache(key, fallbackIfExpired = true) {
     return null;
   }
   return item.data;
+}
+
+/**
+ * Read several cache keys at once (single SQLite query). Returns { key: data | null }.
+ * Expired entries are still returned so offline mode never shows a blank screen.
+ */
+export async function getCacheMany(keys) {
+  const raw = await getGenericCacheMany(keys);
+  const out = {};
+  keys.forEach((k) => {
+    out[k] = raw[k] ? raw[k].data ?? null : null;
+  });
+  return out;
 }
 
 /**

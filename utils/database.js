@@ -63,6 +63,14 @@ export const getDb = async () => {
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     );
                 `)
+                // Lightweight migrations for the sync queue (ignored if the column already exists)
+                for (const col of [
+                    'retry_count INTEGER DEFAULT 0',
+                    'options TEXT',
+                    'last_error TEXT',
+                ]) {
+                    try { await instance.execAsync(`ALTER TABLE sync_queue ADD COLUMN ${col}`) } catch (_) { }
+                }
                 return instance
             } catch (e) {
                 console.error("Error opening/initializing database:", e)
@@ -124,7 +132,9 @@ export const runExclusive = async (fn) => {
     return nextLock
 }
 
-export const enqueueSync = async (tableName, action, payloadObj) => {
+export const MAX_SYNC_RETRIES = 5
+
+export const enqueueSync = async (tableName, action, payloadObj, options = null) => {
     const db = await getDb()
     if (!db) return null
 
@@ -132,8 +142,8 @@ export const enqueueSync = async (tableName, action, payloadObj) => {
         try {
             const payloadString = JSON.stringify(payloadObj)
             const result = await db.runAsync(
-                'INSERT INTO sync_queue (table_name, action, payload, status) VALUES (?, ?, ?, ?)',
-                [tableName, action, payloadString, 'PENDING']
+                'INSERT INTO sync_queue (table_name, action, payload, status, options) VALUES (?, ?, ?, ?, ?)',
+                [tableName, action, payloadString, 'PENDING', options ? JSON.stringify(options) : null]
             )
             return result.lastInsertRowId
         } catch (e) {
@@ -148,7 +158,11 @@ export const getPendingSyncItems = async () => {
     if (!db) return []
 
     try {
-        const result = await db.getAllAsync('SELECT * FROM sync_queue WHERE status = "PENDING" ORDER BY id ASC')
+        // PENDING items plus FAILED ones that still have retries left (transient errors shouldn't lose data)
+        const result = await db.getAllAsync(
+            "SELECT * FROM sync_queue WHERE status = 'PENDING' OR (status = 'FAILED' AND COALESCE(retry_count, 0) < ?) ORDER BY id ASC",
+            [MAX_SYNC_RETRIES]
+        )
         return result
     } catch (e) {
         console.error("Failed to get pending sync items:", e)
@@ -160,19 +174,48 @@ export const markSyncItemCompleted = async (id) => {
     const db = await getDb()
     if (!db) return
     try {
-        await db.runAsync('UPDATE sync_queue SET status = "COMPLETED" WHERE id = ?', [id])
+        await db.runAsync("UPDATE sync_queue SET status = 'COMPLETED' WHERE id = ?", [id])
     } catch (e) {
         console.error("Failed to mark sync item completed:", e)
     }
 }
 
-export const markSyncItemFailed = async (id) => {
+export const markSyncItemFailed = async (id, errorMessage = null) => {
     const db = await getDb()
     if (!db) return
     try {
-        await db.runAsync('UPDATE sync_queue SET status = "FAILED" WHERE id = ?', [id])
+        await db.runAsync(
+            "UPDATE sync_queue SET status = CASE WHEN COALESCE(retry_count, 0) + 1 >= ? THEN 'DEAD' ELSE 'FAILED' END, retry_count = COALESCE(retry_count, 0) + 1, last_error = ? WHERE id = ?",
+            [MAX_SYNC_RETRIES, errorMessage ? String(errorMessage).slice(0, 300) : null, id]
+        )
     } catch (e) {
         console.error("Failed to mark sync item failed:", e)
+    }
+}
+
+export const pruneCompletedSyncItems = async () => {
+    const db = await getDb()
+    if (!db) return
+    try {
+        await db.runAsync("DELETE FROM sync_queue WHERE status = 'COMPLETED'")
+    } catch (e) {
+        console.warn("Failed to prune completed sync items:", e?.message || e)
+    }
+}
+
+export const getSyncQueueStats = async () => {
+    const db = await getDb()
+    if (!db) return { pending: 0, dead: 0 }
+    try {
+        const rows = await db.getAllAsync("SELECT status, COUNT(*) AS n FROM sync_queue GROUP BY status")
+        const stats = { pending: 0, dead: 0 }
+        rows.forEach(r => {
+            if (r.status === 'PENDING' || r.status === 'FAILED') stats.pending += r.n
+            if (r.status === 'DEAD') stats.dead += r.n
+        })
+        return stats
+    } catch (_) {
+        return { pending: 0, dead: 0 }
     }
 }
 
@@ -277,21 +320,43 @@ export const setGenericCache = async (key, valueObj) => {
     })
 }
 
+// Reads do NOT go through runExclusive: SQLite (WAL) allows concurrent reads, and queueing ~40 reads
+// behind every cache write was a major source of lag on the Home screen.
 export const getGenericCache = async (key) => {
-    return runExclusive(async () => {
-        try {
-            return await safeDbOp(async (db) => {
-                const result = await db.getFirstAsync('SELECT cache_value FROM generic_cache WHERE cache_key = ?', [key])
-                if (result && result.cache_value) {
-                    return JSON.parse(result.cache_value)
-                }
-                return null
-            })
-        } catch (e) {
-            console.warn(`Failed to get generic cache for key ${key}:`, e?.message || e)
+    try {
+        return await safeDbOp(async (db) => {
+            const result = await db.getFirstAsync('SELECT cache_value FROM generic_cache WHERE cache_key = ?', [key])
+            if (result && result.cache_value) {
+                return JSON.parse(result.cache_value)
+            }
             return null
-        }
-    })
+        })
+    } catch (e) {
+        console.warn(`Failed to get generic cache for key ${key}:`, e?.message || e)
+        return null
+    }
+}
+
+/** Reads many cache keys with ONE query. Returns { key: parsedValue | null }. */
+export const getGenericCacheMany = async (keys = []) => {
+    const out = {}
+    keys.forEach(k => { out[k] = null })
+    if (keys.length === 0) return out
+    try {
+        const rows = await safeDbOp(async (db) => {
+            const placeholders = keys.map(() => '?').join(',')
+            return await db.getAllAsync(
+                `SELECT cache_key, cache_value FROM generic_cache WHERE cache_key IN (${placeholders})`,
+                keys
+            )
+        })
+        ;(rows || []).forEach(r => {
+            try { out[r.cache_key] = JSON.parse(r.cache_value) } catch (_) { out[r.cache_key] = null }
+        })
+    } catch (e) {
+        console.warn('Failed to batch-read cache:', e?.message || e)
+    }
+    return out
 }
 
 export const clearGenericCache = async (key) => {

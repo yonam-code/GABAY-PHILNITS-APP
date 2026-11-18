@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { ActivityIndicator, Animated, Image, StyleSheet, Text, View } from 'react-native'
+import { ActivityIndicator, Animated, AppState, Image, StyleSheet, Text, View } from 'react-native'
 import AsyncStorage from '@react-native-async-storage/async-storage'
 import { NavigationContainer, useNavigationContainerRef, DefaultTheme } from '@react-navigation/native'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
@@ -48,7 +48,7 @@ import { supabase } from './utils/supabase'
 import NetInfo from '@react-native-community/netinfo'
 import { initDb, getUserCache, saveUserCache, saveUserSession, getActiveUserSession, clearUserSession } from './utils/database'
 import { clearCache } from './utils/cache'
-import { processSyncQueue, addSyncListener } from './utils/syncManager'
+import { processSyncQueue, addSyncListener, precachePracticeContent } from './utils/syncManager'
 import { startRealtimeNotifications, stopRealtimeNotifications } from './utils/notificationManager'
 
 const Stack = createNativeStackNavigator()
@@ -78,12 +78,83 @@ export default function App() {
 	const [syncNotice, setSyncNotice] = useState(null)
 	const navigationRef = useNavigationContainerRef()
 	const fadeAnim = useRef(new Animated.Value(1)).current
+	const backgroundVerifyRef = useRef(false)
+
+	// Instant route from the local SQLite session. Only used when the user has already
+	// finished personal info + diagnostic, so no network round trips are needed to start.
+	const getFastLocalRoute = async () => {
+		try {
+			const localSession = await getActiveUserSession()
+			if (!localSession?.user_id) return null
+			const cachedData = await getUserCache(localSession.user_id)
+			if (!cachedData?.personal_info_completed || !cachedData?.diagnostic_completed) return null
+			const hasPin = Boolean(localSession.hasPin || (cachedData.pin_hash && String(cachedData.pin_hash).trim().length > 0))
+			return hasPin ? 'PinAuth' : 'Home'
+		} catch (_) {
+			return null
+		}
+	}
+
+	// Validates the remote session and refreshes the local cache AFTER the app is already visible.
+	const verifySessionInBackground = async () => {
+		const resetToLogin = async () => {
+			await clearUserSession().catch(() => { })
+			await clearCache().catch(() => { })
+			await supabase.auth.signOut().catch(() => { })
+			for (let i = 0; i < 20 && !navigationRef.isReady(); i++) {
+				await new Promise(r => setTimeout(r, 100))
+			}
+			if (navigationRef.isReady()) {
+				navigationRef.reset({ index: 0, routes: [{ name: 'Login' }] })
+			}
+		}
+		try {
+			const net = await NetInfo.fetch()
+			if (!net.isConnected) return
+			const { data, error } = await supabase.auth.getSession()
+			if (error) {
+				const errMsg = (error.message || '').toLowerCase()
+				if (errMsg.includes('refresh token') || error.status === 400) await resetToLogin()
+				return
+			}
+			const activeUser = data?.session?.user
+			if (!activeUser) {
+				await resetToLogin()
+				return
+			}
+			const [personalRes, userRes] = await Promise.all([
+				supabase.from('personal_info').select('user_id, target_exam_level').eq('user_id', activeUser.id).maybeSingle(),
+				supabase.from('users').select('pin_hash').ilike('email', activeUser.email).maybeSingle(),
+			])
+			// Only overwrite the cache if the queries actually succeeded
+			if (personalRes?.error || userRes?.error) return
+			const pinHash = userRes?.data?.pin_hash && String(userRes.data.pin_hash).trim() ? userRes.data.pin_hash : null
+			await saveUserCache(activeUser.id, pinHash, true, true)
+			await saveUserSession(activeUser, {
+				pin_hash: pinHash,
+				target_exam_level: personalRes?.data?.target_exam_level || '',
+			})
+		} catch (e) {
+			const msg = String(e?.message || e).toLowerCase()
+			if (msg.includes('refresh token')) await resetToLogin()
+			else console.warn('Background session verification failed:', e?.message || e)
+		}
+	}
 
 	const determineInitialRoute = async () => {
 		try {
 			const netState = await NetInfo.fetch()
 			const isOnline = Boolean(netState.isConnected)
 			setIsOffline(!isOnline)
+
+			// Fast path: known, fully-onboarded user -> start instantly, verify in the background
+			if (isOnline) {
+				const fastRoute = await getFastLocalRoute()
+				if (fastRoute) {
+					backgroundVerifyRef.current = true
+					return fastRoute
+				}
+			}
 
 			let activeUser = null
 
@@ -144,25 +215,20 @@ export default function App() {
 					return 'Home'
 				}
 
-				// Check personal info completion
-				const { data: personalInfoData } = await supabase
-					.from('personal_info')
-					.select('user_id, target_exam_level')
-					.eq('user_id', userId)
-					.maybeSingle()
+				// Run the three completion checks in parallel instead of one after another
+				const [personalRes, diagnosticRes, pinRes] = await Promise.all([
+					supabase.from('personal_info').select('user_id, target_exam_level').eq('user_id', userId).maybeSingle(),
+					supabase.from('diagnostic_assessment_attempts').select('id').eq('user_id', userId).limit(1).maybeSingle(),
+					supabase.from('users').select('pin_hash').ilike('email', activeUser.email).maybeSingle(),
+				])
+				const personalInfoData = personalRes?.data
 
 				if (!personalInfoData) {
 					await saveUserCache(userId, null, false, false)
 					return 'PersonalInfo'
 				}
 
-				// Check diagnostic assessment completion
-				const { data: diagnosticData } = await supabase
-					.from('diagnostic_assessment_attempts')
-					.select('id')
-					.eq('user_id', userId)
-					.limit(1)
-					.maybeSingle()
+				const diagnosticData = diagnosticRes?.data
 
 				if (!diagnosticData) {
 					await saveUserCache(userId, null, true, false)
@@ -170,12 +236,7 @@ export default function App() {
 				}
 
 				// Check if user has a PIN — if so, gate with PinAuth
-				const userEmail = activeUser.email
-				const { data: userData } = await supabase
-					.from('users')
-					.select('pin_hash')
-					.ilike('email', userEmail)
-					.maybeSingle()
+				const userData = pinRes?.data
 
 				const hasPin = Boolean(userData?.pin_hash && String(userData.pin_hash).trim().length > 0)
 				await saveUserCache(userId, hasPin ? userData.pin_hash : null, true, true)
@@ -213,6 +274,10 @@ export default function App() {
 				useNativeDriver: true,
 			}).start(() => {
 				setLoading(false)
+				if (backgroundVerifyRef.current) {
+					backgroundVerifyRef.current = false
+					verifySessionInBackground()
+				}
 			})
 		}
 		init()
@@ -266,7 +331,14 @@ export default function App() {
 			setIsOffline(offline)
 			if (!offline) {
 				processSyncQueue()
+				// Download practice content for offline use shortly after connecting (throttled to once / 12h)
+				setTimeout(() => { precachePracticeContent().catch(() => {}) }, 5000)
 			}
+		})
+
+		// Flush queued offline changes whenever the app returns to the foreground
+		const appStateSub = AppState.addEventListener('change', (nextState) => {
+			if (nextState === 'active') processSyncQueue()
 		})
 
 		const unsubscribeSync = addSyncListener(({ status }) => {
@@ -281,6 +353,7 @@ export default function App() {
 		return () => {
 			unsubscribeNet()
 			unsubscribeSync()
+			appStateSub.remove()
 		}
 	}, [])
 

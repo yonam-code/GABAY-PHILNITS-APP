@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import {
-  Image, Keyboard, KeyboardAvoidingView, Modal, Platform, ScrollView, StatusBar, StyleSheet,
+  Image, Keyboard, Modal, Platform, ScrollView, StatusBar, StyleSheet,
   Text, TextInput, TouchableOpacity, View, ActivityIndicator
 } from 'react-native'
+import KeyboardAvoidingView from '../../../components/KeyboardSafeView'
 import { Feather, FontAwesome, Ionicons } from '@expo/vector-icons'
 import { supabase } from '../../../utils/supabase'
 
@@ -293,7 +294,7 @@ export default function RateApp({ navigation }) {
       )}
 
       {/* ── Rating Dialog Bottom Sheet ── */}
-      <Modal
+      <Modal statusBarTranslucent navigationBarTranslucent
         visible={ratingModalOpen}
         transparent
         animationType="slide"
