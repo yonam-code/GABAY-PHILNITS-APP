@@ -69,6 +69,7 @@ export default function Report({ navigation }) {
         .select('*')
         .eq('user_id', uid)
         .order('created_at', { ascending: false })
+        .limit(30)
 
       if (!error && Array.isArray(data)) {
         setMyReports(data)

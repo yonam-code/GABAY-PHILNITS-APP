@@ -24,11 +24,46 @@ import {
 // ─── Fallback motivational quotes (used if API fails) ───────────
 // The readiness score and the subject-progress bars both need the user's most recent MCQ / True-False
 // results. Fetch them once (superset of both selects) and share the in-flight request for a short time.
+
+// One server call (see supabase_performance_optimization.sql) that returns everything Home needs:
+// activity dates for the streak + recent MCQ / T-F / mock / matching / flashcard rows.
+// If the SQL function isn't deployed yet this resolves to null and the old per-table queries are used.
+let dashboardMemo = { uid: null, ts: 0, promise: null }
+let dashboardUnavailable = false
+const getHomeDashboard = (uid) => {
+  if (dashboardUnavailable || !uid) return Promise.resolve(null)
+  const now = Date.now()
+  if (dashboardMemo.uid === uid && dashboardMemo.promise && now - dashboardMemo.ts < 20000) {
+    return dashboardMemo.promise
+  }
+  const promise = Promise.resolve(supabase.rpc('get_home_dashboard', { p_days: 63 }))
+    .then(({ data, error }) => {
+      if (error) {
+        // 42883 / PGRST202 = function not deployed. Remember so we don't retry on every refresh.
+        const code = String(error.code || '')
+        if (code === '42883' || code === 'PGRST202' || /could not find the function/i.test(error.message || '')) {
+          dashboardUnavailable = true
+        }
+        return null
+      }
+      return data && typeof data === 'object' ? data : null
+    })
+    .catch(() => null)
+  dashboardMemo = { uid, ts: now, promise }
+  return promise
+}
+
 let recentResultsMemo = { uid: null, ts: 0, promise: null }
-const fetchRecentPracticeResults = (uid) => {
+const fetchRecentPracticeResults = async (uid) => {
   const now = Date.now()
   if (recentResultsMemo.uid === uid && recentResultsMemo.promise && now - recentResultsMemo.ts < 20000) {
     return recentResultsMemo.promise
+  }
+  const dash = await getHomeDashboard(uid)
+  if (dash && Array.isArray(dash.mcq) && Array.isArray(dash.tf)) {
+    const resolved = Promise.resolve({ mcq: dash.mcq, tf: dash.tf })
+    recentResultsMemo = { uid, ts: now, promise: resolved }
+    return resolved
   }
   const promise = Promise.allSettled([
     supabase
@@ -474,9 +509,11 @@ export default function Home({ session, navigation, route }) {
       const isFE = targetTrack === 'FE'
       setTargetExamType(targetTrack)
 
+      const dash = await getHomeDashboard(uid)
+
       // Query mock exam attempts, MCQ, True/False, Matching, and Flashcards concurrently
       const [attRes, mcqRes, tfRes, matchRes, sesRes] = await Promise.allSettled([
-        supabase
+        (dash && Array.isArray(dash.attempts)) ? Promise.resolve({ data: dash.attempts }) : supabase
           .from('mock_exam_attempts')
           .select('score, total_questions, correct_count, completed_at, mock_exam_configs(title, level_key)')
           .eq('user_id', uid)
@@ -485,13 +522,13 @@ export default function Home({ session, navigation, route }) {
           .limit(20),
         fetchRecentPracticeResults(uid).then((r) => ({ data: r.mcq })),
         fetchRecentPracticeResults(uid).then((r) => ({ data: r.tf })),
-        supabase
+        (dash && Array.isArray(dash.matching)) ? Promise.resolve({ data: dash.matching }) : supabase
           .from('matching_results')
           .select('id, pairs_matched, pairs_total, mistakes, set_title')
           .eq('user_id', uid)
           .order('created_at', { ascending: false })
           .limit(50),
-        supabase
+        (dash && Array.isArray(dash.flashcards)) ? Promise.resolve({ data: dash.flashcards }) : supabase
           .from('flashcard_sessions')
           .select(`
             id,
@@ -684,13 +721,27 @@ export default function Home({ session, navigation, route }) {
           ? 'leaderboard_weekly'
           : 'leaderboard_all_time'
 
-      // Strategy 1: Fetch from official leaderboard view
-      const { data: viewData, error: viewErr } = await supabase
-        .from(viewName)
-        .select('user_id, total_points')
-        .limit(20)
+      // Strategy 0: single server call that returns the top N WITH display names
+      const rpcNames = {}
+      try {
+        const lbRes = await supabase.rpc('get_leaderboard', { p_timeframe: selectedTimeframe === 'all' ? 'all_time' : selectedTimeframe, p_limit: 20 })
+        if (!lbRes.error && Array.isArray(lbRes.data) && lbRes.data.length > 0) {
+          leaderboardData = lbRes.data.map(r => ({ user_id: r.user_id, points: Number(r.total_points || 0) }))
+          lbRes.data.forEach(r => { if (r.user_name) rpcNames[r.user_id] = extractFirstName(r.user_name) })
+        }
+      } catch (_) {}
 
-      if (!viewErr && viewData && viewData.length > 0) {
+      // Strategy 1: Fetch from official leaderboard view
+      const { data: viewData, error: viewErr } = leaderboardData.length > 0
+        ? { data: null, error: null }
+        : await supabase
+          .from(viewName)
+          .select('user_id, total_points')
+          .limit(20)
+
+      if (leaderboardData.length > 0) {
+        // already filled by Strategy 0
+      } else if (!viewErr && viewData && viewData.length > 0) {
         leaderboardData = viewData.map(r => ({
           user_id: r.user_id,
           points: Number(r.total_points || 0),
@@ -752,11 +803,14 @@ export default function Home({ session, navigation, route }) {
         profileName || session?.user?.user_metadata?.full_name || session?.user?.user_metadata?.fullName,
         session?.user?.email
       )
+      Object.assign(nameMap, rpcNames)
       if (currentUserId) {
         nameMap[currentUserId] = myResolvedFirstName
       }
 
-      if (userIds.length > 0) {
+      // Only look up names the server didn't already give us
+      const idsNeedingNames = userIds.filter(id => !rpcNames[id])
+      if (idsNeedingNames.length > 0) {
         // All three name sources are independent, so run them in parallel.
         // Each one is bounded: no full-table downloads.
         const numericIds = userIds.filter(id => !isNaN(Number(id)))
@@ -954,7 +1008,10 @@ export default function Home({ session, navigation, route }) {
       // 2. Fetch activity & login streak across activities + daily logins
       // The streak only looks back 60 days, so never download older history
       const streakSince = new Date(Date.now() - 63 * 24 * 60 * 60 * 1000).toISOString()
-      const [sesRes, mcqRes, tfRes, matchRes, mockRes, streakRes] = await Promise.allSettled([
+      const streakDash = await getHomeDashboard(uid)
+      const hasServerDates = Boolean(streakDash && Array.isArray(streakDash.activity_dates))
+      const none = Promise.resolve({ data: [] })
+      const [sesRes, mcqRes, tfRes, matchRes, mockRes, streakRes] = await Promise.allSettled(hasServerDates ? [none, none, none, none, none, none] : [
         supabase.from('flashcard_sessions').select('created_at, completed_at, started_at').eq('user_id', uid).gte('created_at', streakSince).limit(1000),
         supabase.from('multiple_choice_results').select('answered_at').eq('user_id', uid).gte('answered_at', streakSince).limit(2000),
         supabase.from('true_false_results').select('answered_at').eq('user_id', uid).gte('answered_at', streakSince).limit(2000),
@@ -974,6 +1031,7 @@ export default function Home({ session, navigation, route }) {
       // Collect all active dates converted to Philippine Standard Time (UTC+8)
       const activityDays = new Set([
         todayPH, // Current app open/login session actively counts for today
+        ...(hasServerDates ? streakDash.activity_dates : []),
         ...ses.map(s => utcToPHDateKey(s.completed_at || s.started_at || s.created_at)),
         ...mcq.map(r => utcToPHDateKey(r.answered_at)),
         ...tf.map(r => utcToPHDateKey(r.answered_at)),
@@ -1144,6 +1202,7 @@ export default function Home({ session, navigation, route }) {
   const onRefresh = useCallback(async () => {
     setRefreshing(true)
     recentResultsMemo = { uid: null, ts: 0, promise: null }
+    dashboardMemo = { uid: null, ts: 0, promise: null }
     // Clear cache first on pull-to-refresh to ensure loading live data
     await clearCache('home_cse_schedule')
     await clearCache('home_readiness')

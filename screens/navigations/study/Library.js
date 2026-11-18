@@ -921,9 +921,9 @@ export default function Library({ navigation }) {
       // Note: We deliberately exclude the bulky thumbnail_url column (which contains 50KB+ base64 strings)
       // to keep the payload under 30KB and load the shelf in < 400ms. DefaultBookCover renders native vector art.
       const [vRes, rRes, progRes, resolvedTrack] = await Promise.allSettled([
-        withTimeout(supabase.from('video_lectures').select('*').eq('is_published', true).order('sort_order', { ascending: true }), 15000),
+        withTimeout(supabase.from('video_lectures').select('id, title, subject, duration_minutes, url, youtube_id, thumbnail_url, author, author_url, description, exam_level, fe_section, sort_order').eq('is_published', true).order('sort_order', { ascending: true }), 15000),
         withTimeout(supabase.from('reading_materials').select('id, title, subtitle, author, subject, exam_level, fe_section, pdf_url, sort_order, total_pages, learning_objective, is_published, created_at, chapter').eq('is_published', true).order('subject').order('sort_order'), 15000),
-        uid ? withTimeout(supabase.from('user_reading_progress').select('*').eq('user_id', uid), 10000) : Promise.resolve({ data: [] }),
+        uid ? withTimeout(supabase.from('user_reading_progress').select('reading_material_id, is_completed, current_chapter_number').eq('user_id', uid), 10000) : Promise.resolve({ data: [] }),
         resolveUserTargetExam(uid, userTargetExam)
       ])
 
