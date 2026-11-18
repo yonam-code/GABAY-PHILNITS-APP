@@ -1,66 +1,244 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import {
   StyleSheet, Text, View, ActivityIndicator, TouchableOpacity,
-  Modal, Alert, ScrollView, Platform, Linking, StatusBar
+  Modal, ScrollView, Platform, Linking, StatusBar, useWindowDimensions
 } from 'react-native'
 import { Ionicons, Feather } from '@expo/vector-icons'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { WebView } from 'react-native-webview'
 import * as Location from 'expo-location'
-
-let MapView, Marker
-try {
-  const Maps = require('react-native-maps')
-  MapView = Maps.default || Maps
-  Marker = Maps.Marker
-} catch (e) {
-  console.warn('react-native-maps failed to load:', e)
-}
+import { supabase } from '../../../utils/supabase'
+import { getCache, setCache } from '../../../utils/cache'
+import { withTimeout } from '../../../utils/queryHelper'
+import { getScrollBottomPadding } from '../../../utils/responsiveLayout'
 
 const NAVY = '#0f2747'
 const ACCENT = '#d85e67'
 
-// Fallback data in case HTTP request fails or user is offline
-const FALLBACK_SITES = [
-  { id: 1, name: 'PhilNITS Foundation Headquarters', address: '3/F Oppen Bldg, 349 Sen. Gil Puyat Ave, Makati City', lat: 14.5606, lng: 121.0189, phone: '(02) 8890-5026' },
-  { id: 2, name: 'UP Diliman (Dept. of Computer Science)', address: 'Engineering Complex, UP Diliman, Quezon City', lat: 14.6538, lng: 121.0685, phone: '(02) 8981-8500' },
-  { id: 3, name: 'Ateneo de Manila University (DISCS)', address: 'Katipunan Ave, Loyola Heights, Quezon City', lat: 14.6396, lng: 121.0775, phone: '(02) 8426-6001' },
-  { id: 4, name: 'De La Salle University (CCS)', address: '2401 Taft Ave, Malate, Manila', lat: 14.5648, lng: 120.9932, phone: '(02) 8524-4611' },
-  { id: 5, name: 'University of Santo Tomas (CICS)', address: 'España Blvd, Sampaloc, Manila', lat: 14.6095, lng: 120.9898, phone: '(02) 8786-1611' },
-  { id: 6, name: 'Mapúa University (School of IT)', address: 'Muralla St, Intramuros, Manila', lat: 14.5905, lng: 120.9779, phone: '(02) 8247-5000' },
-  { id: 7, name: 'Saint Louis University (Baguio)', address: 'A. Bonifacio St, Baguio City, Benguet', lat: 16.4178, lng: 120.5985, phone: '(074) 442-2793' },
-  { id: 8, name: 'Angeles University Foundation (AUF)', address: 'MacArthur Hwy, Angeles City, Pampanga', lat: 15.1451, lng: 120.5935, phone: '(045) 625-2888' },
-  { id: 9, name: 'University of Saint Louis (Tuguegarao)', address: 'Mabini St, Tuguegarao City, Cagayan', lat: 17.6186, lng: 121.7303, phone: '(078) 844-1872' },
-  { id: 10, name: 'Cebu Institute of Technology - University', address: 'N. Bacalso Ave, Cebu City', lat: 10.2946, lng: 123.8809, phone: '(032) 261-7741' },
-  { id: 11, name: 'University of San Carlos (Talamban)', address: 'Gov. M. Cuenco Ave, Cebu City', lat: 10.3541, lng: 123.9130, phone: '(032) 230-0100' },
-  { id: 12, name: 'Iloilo Science & Technology University', address: 'Burgos St, La Paz, Iloilo City', lat: 10.7169, lng: 122.5648, phone: '(033) 320-7190' },
-  { id: 13, name: 'Ateneo de Davao University', address: 'E. Jacinto St, Poblacion District, Davao City', lat: 7.0722, lng: 125.6128, phone: '(082) 221-2411' },
-  { id: 14, name: 'Xavier University - Ateneo de Cagayan', address: '73 Corrales Ave, Cagayan de Oro City', lat: 8.4776, lng: 124.6468, phone: '(088) 853-9800' }
+const VENUES_TABLE = 'philnits_testing_venues'
+const VENUES_COLUMNS = 'id, name, address, city, region, latitude, longitude, phone, email, website, notes, sort_order'
+const CACHE_KEY = 'philnits_testing_venues_v1'
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000
+const DEFAULT_CENTER = { latitude: 14.5995, longitude: 120.9842 } // Manila
+
+// Last-resort list, used ONLY when the venues table has never been loaded (no connection and no saved copy,
+// or supabase_testing_venues.sql has not been run yet). Live Supabase data always replaces it.
+const BUILTIN_SITES = [
+  { id: 'b1', name: 'PhilNITS Foundation Headquarters', address: '3/F Oppen Bldg, 349 Sen. Gil Puyat Ave, Makati City', lat: 14.5606, lng: 121.0189, phone: '(02) 8890-5026' },
+  { id: 'b2', name: 'UP Diliman (Dept. of Computer Science)', address: 'Engineering Complex, UP Diliman, Quezon City', lat: 14.6538, lng: 121.0685, phone: '(02) 8981-8500' },
+  { id: 'b3', name: 'Ateneo de Manila University (DISCS)', address: 'Katipunan Ave, Loyola Heights, Quezon City', lat: 14.6396, lng: 121.0775, phone: '(02) 8426-6001' },
+  { id: 'b4', name: 'De La Salle University (CCS)', address: '2401 Taft Ave, Malate, Manila', lat: 14.5648, lng: 120.9932, phone: '(02) 8524-4611' },
+  { id: 'b5', name: 'University of Santo Tomas (CICS)', address: 'España Blvd, Sampaloc, Manila', lat: 14.6095, lng: 120.9898, phone: '(02) 8786-1611' },
+  { id: 'b6', name: 'Mapúa University (School of IT)', address: 'Muralla St, Intramuros, Manila', lat: 14.5905, lng: 120.9779, phone: '(02) 8247-5000' },
+  { id: 'b7', name: 'Saint Louis University (Baguio)', address: 'A. Bonifacio St, Baguio City, Benguet', lat: 16.4178, lng: 120.5985, phone: '(074) 442-2793' },
+  { id: 'b8', name: 'Angeles University Foundation (AUF)', address: 'MacArthur Hwy, Angeles City, Pampanga', lat: 15.1451, lng: 120.5935, phone: '(045) 625-2888' },
+  { id: 'b9', name: 'University of Saint Louis (Tuguegarao)', address: 'Mabini St, Tuguegarao City, Cagayan', lat: 17.6186, lng: 121.7303, phone: '(078) 844-1872' },
+  { id: 'b10', name: 'Cebu Institute of Technology - University', address: 'N. Bacalso Ave, Cebu City', lat: 10.2946, lng: 123.8809, phone: '(032) 261-7741' },
+  { id: 'b11', name: 'University of San Carlos (Talamban)', address: 'Gov. M. Cuenco Ave, Cebu City', lat: 10.3541, lng: 123.9130, phone: '(032) 230-0100' },
+  { id: 'b12', name: 'Iloilo Science & Technology University', address: 'Burgos St, La Paz, Iloilo City', lat: 10.7169, lng: 122.5648, phone: '(033) 320-7190' },
+  { id: 'b13', name: 'Ateneo de Davao University', address: 'E. Jacinto St, Poblacion District, Davao City', lat: 7.0722, lng: 125.6128, phone: '(082) 221-2411' },
+  { id: 'b14', name: 'Xavier University - Ateneo de Cagayan', address: '73 Corrales Ave, Cagayan de Oro City', lat: 8.4776, lng: 124.6468, phone: '(088) 853-9800' },
 ]
+
+// ── helpers ──────────────────────────────────────────────────────────────
+const toNumber = (v) => {
+  const n = typeof v === 'number' ? v : parseFloat(v)
+  return Number.isFinite(n) ? n : null
+}
+
+// Database row -> shape used by this screen
+function normalizeVenue(row) {
+  if (!row || !row.name) return null
+  return {
+    id: String(row.id),
+    name: String(row.name).trim(),
+    address: row.address || '',
+    city: row.city || '',
+    region: row.region || '',
+    lat: toNumber(row.latitude ?? row.lat),
+    lng: toNumber(row.longitude ?? row.lng),
+    phone: row.phone || '',
+    email: row.email || '',
+    website: row.website || '',
+    notes: row.notes || '',
+  }
+}
+
+const rad = (deg) => deg * (Math.PI / 180)
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371
+  const dLat = rad(lat2 - lat1)
+  const dLon = rad(lon2 - lon1)
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(rad(lat1)) * Math.cos(rad(lat2)) * Math.sin(dLon / 2) ** 2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+const withTimeoutValue = (promise, ms) =>
+  Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))])
+
+// Self-contained OpenStreetMap (Leaflet) page. No Google Maps API key is needed, so it can never crash the app.
+function buildMapHtml(sites, user) {
+  const payload = JSON.stringify(
+    sites.filter((s) => s.lat != null && s.lng != null).map((s) => ({ id: s.id, la: s.lat, lo: s.lng }))
+  ).replace(/</g, '\\u003c')
+  const userJson = JSON.stringify(user ? { la: user.latitude, lo: user.longitude } : null)
+
+  return `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  html, body, #map { width:100%; height:100%; margin:0; padding:0; background:#e2e8f0; }
+  #off { display:none; position:absolute; inset:0; z-index:9999; background:#e2e8f0; color:#475569;
+         font: 600 14px -apple-system, Roboto, sans-serif; text-align:center; align-items:center; justify-content:center; padding:24px; }
+</style>
+</head><body>
+<div id="map"></div>
+<div id="off">The map needs an internet connection.<br/>Venues are still listed below.</div>
+<script>
+(function () {
+  function send(o) { try { window.ReactNativeWebView.postMessage(JSON.stringify(o)); } catch (e) {} }
+  if (typeof L === 'undefined') { document.getElementById('off').style.display = 'flex'; send({ type: 'nomap' }); return; }
+
+  var SITES = ${payload};
+  var USER = ${userJson};
+  var map = L.map('map', { zoomControl: true, attributionControl: true });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18, attribution: '&copy; OpenStreetMap' }).addTo(map);
+
+  var markers = {};
+  var selected = null;
+  function style(sel) {
+    return { radius: sel ? 12 : 9, color: '#ffffff', weight: 3, fillColor: sel ? '#0f2747' : '#d85e67', fillOpacity: 1 };
+  }
+  SITES.forEach(function (s) {
+    var m = L.circleMarker([s.la, s.lo], style(false)).addTo(map);
+    m.on('click', function () { send({ type: 'select', id: s.id }); });
+    markers[s.id] = m;
+  });
+  if (USER) {
+    L.circleMarker([USER.la, USER.lo], { radius: 8, color: '#ffffff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 }).addTo(map);
+  }
+
+  var pts = SITES.map(function (s) { return [s.la, s.lo]; });
+  if (USER) {
+    var nearest = SITES.slice().sort(function (a, b) {
+      return Math.hypot(a.la - USER.la, a.lo - USER.lo) - Math.hypot(b.la - USER.la, b.lo - USER.lo);
+    })[0];
+    map.setView([USER.la, USER.lo], 10);
+    if (nearest) map.fitBounds([[USER.la, USER.lo], [nearest.la, nearest.lo]], { padding: [40, 40], maxZoom: 13 });
+  } else if (pts.length) {
+    map.fitBounds(pts, { padding: [30, 30] });
+  } else {
+    map.setView([${DEFAULT_CENTER.latitude}, ${DEFAULT_CENTER.longitude}], 6);
+  }
+
+  window.focusSite = function (id) {
+    if (selected && markers[selected]) markers[selected].setStyle(style(false));
+    selected = id;
+    var m = markers[id];
+    if (!m) return;
+    m.setStyle(style(true)); m.bringToFront();
+    map.flyTo(m.getLatLng(), Math.max(map.getZoom(), 13), { duration: 0.6 });
+  };
+  send({ type: 'ready' });
+})();
+</script>
+</body></html>`
+}
 
 export default function CseSitesNearMe({ navigation }) {
   const insets = useSafeAreaInsets()
-  const [permissionModalVisible, setPermissionModalVisible] = useState(false)
-  const [location, setLocation] = useState(null)
+  const { height: windowHeight } = useWindowDimensions()
+
   const [sites, setSites] = useState([])
+  const [source, setSource] = useState(null) // 'live' | 'cache' | 'builtin'
   const [loading, setLoading] = useState(true)
-  const [errorMsg, setErrorMsg] = useState(null)
+  const [loadError, setLoadError] = useState(null)
   const [selectedSite, setSelectedSite] = useState(null)
 
-  // Load PhilNITS examination centers and partner universities
-  const fetchCseSites = async () => {
+  const [permissionModalVisible, setPermissionModalVisible] = useState(false)
+  const [location, setLocation] = useState(null)
+  const [locating, setLocating] = useState(false)
+  const [mapUnavailable, setMapUnavailable] = useState(false)
+
+  const webRef = useRef(null)
+  const sitesCountRef = useRef(0)
+  const gotLiveRef = useRef(false)
+  const mountedRef = useRef(true)
+
+  useEffect(() => () => { mountedRef.current = false }, [])
+
+  // ── Venues: saved copy first, then Supabase (never lets an old copy overwrite newer live data) ──
+  const loadVenues = useCallback(async () => {
+    setLoadError(null)
+    if (!gotLiveRef.current && sitesCountRef.current === 0) {
+      const cached = await getCache(CACHE_KEY)
+      if (!gotLiveRef.current && Array.isArray(cached) && cached.length > 0 && mountedRef.current) {
+        sitesCountRef.current = cached.length
+        setSites(cached)
+        setSource('cache')
+        setLoading(false)
+      }
+    }
+
     try {
-      setSites(FALLBACK_SITES)
+      const res = await withTimeout(
+        supabase.from(VENUES_TABLE).select(VENUES_COLUMNS).eq('is_active', true).order('sort_order').order('name'),
+        10000
+      )
+      if (res?.error) throw res.error
+      const rows = (res?.data || []).map(normalizeVenue).filter(Boolean)
+      if (!mountedRef.current) return
+      if (rows.length > 0) {
+        gotLiveRef.current = true
+        sitesCountRef.current = rows.length
+        setSites(rows)
+        setSource('live')
+        setCache(CACHE_KEY, rows, CACHE_TTL_MS).catch(() => {})
+        setSelectedSite((prev) => (prev ? rows.find((r) => r.id === prev.id) || null : prev))
+      } else if (sitesCountRef.current === 0) {
+        throw new Error('No venues have been added yet')
+      }
     } catch (err) {
-      setSites(FALLBACK_SITES)
+      if (!mountedRef.current) return
+      console.warn('[venues] could not load from Supabase:', err?.message || err)
+      if (sitesCountRef.current === 0) {
+        sitesCountRef.current = BUILTIN_SITES.length
+        setSites(BUILTIN_SITES)
+        setSource('builtin')
+        setLoadError("Couldn't load the latest venues. Showing a saved list.")
+      }
+    } finally {
+      if (mountedRef.current) setLoading(false)
     }
-  }
+  }, [])
 
-  const checkPermissionAndGetLocation = async () => {
-    if (Platform.OS === 'web') {
-      getUserLocation()
-      return
+  // ── Location: never blocks the screen, always times out ──
+  const getUserLocation = useCallback(async () => {
+    setLocating(true)
+    try {
+      let coords = null
+      try {
+        const pos = await withTimeoutValue(
+          Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+          9000
+        )
+        coords = pos?.coords
+      } catch (_) {
+        const last = await Location.getLastKnownPositionAsync().catch(() => null)
+        coords = last?.coords || null
+      }
+      if (coords && mountedRef.current) {
+        setLocation({ latitude: coords.latitude, longitude: coords.longitude })
+      }
+    } finally {
+      if (mountedRef.current) setLocating(false)
     }
+  }, [])
 
+  const checkPermissionAndGetLocation = useCallback(async () => {
     try {
       const { status } = await Location.getForegroundPermissionsAsync()
       if (status === 'granted') {
@@ -69,271 +247,214 @@ export default function CseSitesNearMe({ navigation }) {
         setPermissionModalVisible(true)
       }
     } catch (err) {
-      console.error(err)
-      setSites(FALLBACK_SITES)
-      setLoading(false)
+      console.warn('[venues] permission check failed:', err?.message || err)
     }
-  }
+  }, [getUserLocation])
 
   const requestPermission = async () => {
     setPermissionModalVisible(false)
     try {
       const { status } = await Location.requestForegroundPermissionsAsync()
-      if (status === 'granted') {
-        getUserLocation()
-      } else {
-        setErrorMsg('Permission to access location was denied')
-        setLocation({
-          latitude: 14.5995,
-          longitude: 120.9842,
-          latitudeDelta: 3.5,
-          longitudeDelta: 3.5,
-        })
-        setLoading(false)
-      }
+      if (status === 'granted') getUserLocation()
     } catch (err) {
-      console.error(err)
-      setErrorMsg('Error requesting permission')
-      setLoading(false)
-    }
-  }
-
-  const getUserLocation = async () => {
-    setLoading(true)
-    if (Platform.OS === 'web' && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          setLocation({
-            latitude: position.coords.latitude,
-            longitude: position.coords.longitude,
-            latitudeDelta: 0.8,
-            longitudeDelta: 0.8,
-          })
-          setLoading(false)
-        },
-        (error) => {
-          console.warn('Navigator geolocation error:', error)
-          setErrorMsg('Unable to retrieve location')
-          setLocation({
-            latitude: 14.5995,
-            longitude: 120.9842,
-            latitudeDelta: 3.5,
-            longitudeDelta: 3.5,
-          })
-          setLoading(false)
-        },
-        { enableHighAccuracy: true, timeout: 8000, maximumAge: 10000 }
-      )
-      return
-    }
-
-    try {
-      const loc = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Balanced,
-      })
-      setLocation({
-        latitude: loc.coords.latitude,
-        longitude: loc.coords.longitude,
-        latitudeDelta: 0.8,
-        longitudeDelta: 0.8,
-      })
-    } catch (err) {
-      console.warn('Could not get current location:', err)
-      setErrorMsg('Unable to retrieve location')
-      setLocation({
-        latitude: 14.5995,
-        longitude: 120.9842,
-        latitudeDelta: 3.5,
-        longitudeDelta: 3.5,
-      })
-    } finally {
-      setLoading(false)
+      console.warn('[venues] permission request failed:', err?.message || err)
     }
   }
 
   useEffect(() => {
-    fetchCseSites()
+    loadVenues()
     checkPermissionAndGetLocation()
+  }, [loadVenues, checkPermissionAndGetLocation])
+
+  // ── Derived data ──
+  const sortedSites = useMemo(() => {
+    if (!sites.length) return []
+    if (!location) return sites
+    return sites
+      .map((s) => ({
+        ...s,
+        distance: s.lat != null && s.lng != null
+          ? Math.round(distanceKm(location.latitude, location.longitude, s.lat, s.lng) * 10) / 10
+          : undefined,
+      }))
+      .sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity))
+  }, [location, sites])
+
+  // The map page is only rebuilt when the venues or the user's (rounded) position change, not on every tap
+  const userKey = location ? `${location.latitude.toFixed(2)},${location.longitude.toFixed(2)}` : 'none'
+  const mapHtml = useMemo(
+    () => buildMapHtml(sites, location),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sites, userKey]
+  )
+
+  const selectSite = useCallback((site) => {
+    setSelectedSite(site)
+    if (site && webRef.current && site.lat != null) {
+      webRef.current.injectJavaScript(`window.focusSite && window.focusSite(${JSON.stringify(site.id)}); true;`)
+    }
   }, [])
 
-  const getDistance = (lat1, lon1, lat2, lon2) => {
-    const R = 6371 // Radius of the earth in km
-    const dLat = deg2rad(lat2 - lat1)
-    const dLon = deg2rad(lon2 - lon1)
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2)
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-    const d = R * c // Distance in km
-    return d.toFixed(1)
+  const onMapMessage = useCallback((event) => {
+    try {
+      const msg = JSON.parse(event.nativeEvent.data)
+      if (msg.type === 'select') {
+        const site = sites.find((s) => s.id === msg.id)
+        if (site) setSelectedSite(site)
+      } else if (msg.type === 'nomap') {
+        setMapUnavailable(true)
+      } else if (msg.type === 'ready') {
+        setMapUnavailable(false)
+      }
+    } catch (_) {}
+  }, [sites])
+
+  const openDirections = (site) => {
+    if (site.lat == null || site.lng == null) return
+    Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${site.lat},${site.lng}`).catch(() => {})
+  }
+  const callSite = (phone) => {
+    const digits = String(phone || '').replace(/[^\d+]/g, '')
+    if (digits) Linking.openURL(`tel:${digits}`).catch(() => {})
   }
 
-  const deg2rad = (deg) => {
-    return deg * (Math.PI / 180)
-  }
-
-  const sortedSites = React.useMemo(() => {
-    if (!location || !sites || sites.length === 0) return sites
-    return [...sites].map(site => {
-      const dist = getDistance(location.latitude, location.longitude, site.lat, site.lng)
-      return { ...site, distance: parseFloat(dist) }
-    }).sort((a, b) => a.distance - b.distance)
-  }, [location, sites])
+  const sheetHeight = Math.round(Math.min(Math.max(windowHeight * 0.46, 250), 440))
+  const listBottomPadding = getScrollBottomPadding(insets, true, 8)
 
   return (
     <View style={styles.screen}>
       <StatusBar barStyle="dark-content" backgroundColor="#fff" />
 
       {/* Header */}
-      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top, StatusBar.currentHeight || 0) + 8 }]}>
+        <TouchableOpacity style={styles.backBtn} onPress={() => navigation.goBack()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Feather name="arrow-left" size={24} color={NAVY} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>PhilNITS Testing Venues</Text>
+        <Text style={styles.headerTitle} numberOfLines={1}>PhilNITS Testing Venues</Text>
         <View style={styles.placeholderBtn} />
       </View>
 
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={NAVY} />
-          <Text style={styles.loadingText}>Locating nearest testing centers...</Text>
+          <Text style={styles.loadingText}>Loading testing venues…</Text>
         </View>
       ) : (
         <View style={styles.content}>
-          {/* Map View */}
-          {MapView && Platform.OS !== 'web' ? (
-            <MapView
-              style={styles.map}
-              initialRegion={location}
-              showsUserLocation={true}
-              showsMyLocationButton={true}
-            >
-              {location && Marker && (
-                <Marker
-                  coordinate={{ latitude: location.latitude, longitude: location.longitude }}
-                  title="Your Location"
-                  pinColor="blue"
-                />
-              )}
+          {/* Map (OpenStreetMap, no API key) */}
+          <View style={styles.map}>
+            <WebView
+              ref={webRef}
+              style={styles.webview}
+              originWhitelist={['*']}
+              source={{ html: mapHtml, baseUrl: 'https://gabay-philnits.app/' }}
+              javaScriptEnabled
+              domStorageEnabled
+              onMessage={onMapMessage}
+              androidLayerType="hardware"
+              mixedContentMode="always"
+              setSupportMultipleWindows={false}
+              overScrollMode="never"
+            />
+            {mapUnavailable ? (
+              <View style={styles.mapNotice} pointerEvents="none">
+                <Feather name="wifi-off" size={14} color="#fff" />
+                <Text style={styles.mapNoticeText}>Map needs internet</Text>
+              </View>
+            ) : null}
+          </View>
 
-              {Marker && sites.map((site) => (
-                <Marker
-                  key={site.id}
-                  coordinate={{ latitude: site.lat, longitude: site.lng }}
-                  title={site.name}
-                  description={site.address}
-                  onPress={() => setSelectedSite(site)}
-                >
-                  <View style={styles.markerContainer}>
-                    <View style={styles.markerPin}>
-                      <Ionicons name="location" size={26} color={ACCENT} />
-                    </View>
-                  </View>
-                </Marker>
-              ))}
-            </MapView>
-          ) : Platform.OS === 'web' ? (
-            <View style={styles.map}>
-              <iframe
-                srcDoc={`
-                  <!DOCTYPE html>
-                  <html>
-                  <head>
-                    <meta charset="utf-8" />
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-                    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-                    <style>
-                      html, body, #map {
-                        width: 100%;
-                        height: 100%;
-                        margin: 0;
-                        padding: 0;
-                      }
-                    </style>
-                  </head>
-                  <body>
-                    <div id="map"></div>
-                    <script>
-                      var userLat = ${location?.latitude || 14.5995};
-                      var userLng = ${location?.longitude || 120.9842};
-                      var map = L.map('map').setView([userLat, userLng], 9);
-                      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        attribution: '&copy; OpenStreetMap contributors'
-                      }).addTo(map);
-
-                      // User marker
-                      var userIcon = L.icon({
-                        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
-                        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-                        iconSize: [25, 41],
-                        iconAnchor: [12, 41],
-                        popupAnchor: [1, -34],
-                        shadowSize: [41, 41]
-                      });
-                      L.marker([userLat, userLng], {icon: userIcon}).addTo(map)
-                        .bindPopup('<b>Your Location</b>').openPopup();
-
-                      // PhilNITS Testing Sites markers
-                      var siteIcon = L.icon({
-                        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
-                        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-                        iconSize: [25, 41],
-                        iconAnchor: [12, 41],
-                        popupAnchor: [1, -34],
-                        shadowSize: [41, 41]
-                      });
-
-                      var sitesList = ${JSON.stringify(sites)};
-                      sitesList.forEach(function(site) {
-                        L.marker([site.lat, site.lng], {icon: siteIcon}).addTo(map)
-                          .bindPopup('<b>' + site.name + '</b><br>' + site.address + '<br>Tel: ' + site.phone);
-                      });
-                    </script>
-                  </body>
-                  </html>
-                `}
-                style={{ width: '100%', height: '100%', minHeight: 350, border: 'none' }}
-                title="PhilNITS Testing Venues Map"
-              />
-            </View>
-          ) : (
-            <View style={styles.mapFallback}>
-              <Feather name="map" size={48} color="#94a3b8" />
-              <Text style={styles.fallbackText}>Map component not available in this environment</Text>
-            </View>
-          )}
-
-          {/* Quick Info & Site Selector list */}
-          <View style={styles.sitesSheet}>
-            <Text style={styles.sheetSectionTitle}>
-              {errorMsg ? 'All PhilNITS Venues' : 'Nearest Centers'}
-            </Text>
-            <ScrollView style={styles.sitesList} showsVerticalScrollIndicator={false}>
-              {sortedSites.map((site) => (
-                <TouchableOpacity
-                  key={site.id}
-                  style={[
-                    styles.siteItem,
-                    selectedSite?.id === site.id && styles.siteItemActive
-                  ]}
-                  onPress={() => {
-                    setSelectedSite(site)
-                  }}
-                >
-                  <View style={styles.siteItemHeader}>
-                    <Text style={styles.siteName}>{site.name}</Text>
-                    {site.distance !== undefined && (
-                      <View style={styles.distanceBadge}>
-                        <Text style={styles.distanceText}>{site.distance} km</Text>
-                      </View>
-                    )}
-                  </View>
-                  <Text style={styles.siteAddress} numberOfLines={1}>{site.address}</Text>
-                  <Text style={styles.sitePhone}><Feather name="phone" size={10} /> {site.phone}</Text>
+          {/* Venue sheet */}
+          <View style={[styles.sitesSheet, { height: sheetHeight }]}>
+            <View style={styles.sheetTitleRow}>
+              <Text style={styles.sheetSectionTitle}>
+                {location ? 'Nearest Centers' : 'All PhilNITS Venues'}
+              </Text>
+              {locating ? <ActivityIndicator size="small" color={NAVY} /> : null}
+              {!location && !locating ? (
+                <TouchableOpacity onPress={checkPermissionAndGetLocation} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={styles.linkText}>Use my location</Text>
                 </TouchableOpacity>
-              ))}
+              ) : null}
+            </View>
+
+            {loadError ? (
+              <View style={styles.errorBanner}>
+                <Text style={styles.errorBannerText} numberOfLines={2}>{loadError}</Text>
+                <TouchableOpacity onPress={() => { setLoading(true); loadVenues() }}>
+                  <Text style={styles.retryText}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
+
+            <ScrollView
+              style={styles.sitesList}
+              contentContainerStyle={{ paddingBottom: listBottomPadding }}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {sortedSites.length === 0 ? (
+                <Text style={styles.emptyText}>No testing venues available yet.</Text>
+              ) : null}
+
+              {sortedSites.map((site) => {
+                const active = selectedSite?.id === site.id
+                const place = [site.city, site.region].filter(Boolean).join(', ')
+                return (
+                  <TouchableOpacity
+                    key={site.id}
+                    style={[styles.siteItem, active && styles.siteItemActive]}
+                    activeOpacity={0.85}
+                    onPress={() => selectSite(site)}
+                  >
+                    <View style={styles.siteItemHeader}>
+                      <Text style={styles.siteName}>{site.name}</Text>
+                      {site.distance !== undefined && (
+                        <View style={styles.distanceBadge}>
+                          <Text style={styles.distanceText}>{site.distance} km</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.siteAddress} numberOfLines={active ? 4 : 1}>{site.address}</Text>
+                    {place ? <Text style={styles.sitePlace} numberOfLines={1}>{place}</Text> : null}
+
+                    {site.phone ? (
+                      <Text style={styles.sitePhone}><Feather name="phone" size={10} /> {site.phone}</Text>
+                    ) : null}
+
+                    {active ? (
+                      <View style={styles.detailBlock}>
+                        {site.email ? (
+                          <TouchableOpacity onPress={() => Linking.openURL(`mailto:${site.email}`).catch(() => {})}>
+                            <Text style={styles.detailLine}><Feather name="mail" size={11} /> {site.email}</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                        {site.website ? (
+                          <TouchableOpacity onPress={() => Linking.openURL(/^https?:/i.test(site.website) ? site.website : `https://${site.website}`).catch(() => {})}>
+                            <Text style={styles.detailLine} numberOfLines={1}><Feather name="globe" size={11} /> {site.website}</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                        {site.notes ? <Text style={styles.detailNotes}>{site.notes}</Text> : null}
+
+                        <View style={styles.actionRow}>
+                          {site.lat != null && site.lng != null ? (
+                            <TouchableOpacity style={styles.actionBtn} onPress={() => openDirections(site)}>
+                              <Feather name="navigation" size={13} color="#fff" />
+                              <Text style={styles.actionBtnText}>Directions</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                          {site.phone ? (
+                            <TouchableOpacity style={[styles.actionBtn, styles.actionBtnAlt]} onPress={() => callSite(site.phone)}>
+                              <Feather name="phone" size={13} color={NAVY} />
+                              <Text style={[styles.actionBtnText, { color: NAVY }]}>Call</Text>
+                            </TouchableOpacity>
+                          ) : null}
+                        </View>
+                      </View>
+                    ) : null}
+                  </TouchableOpacity>
+                )
+              })}
             </ScrollView>
           </View>
         </View>
@@ -344,6 +465,8 @@ export default function CseSitesNearMe({ navigation }) {
         visible={permissionModalVisible}
         transparent
         animationType="fade"
+        statusBarTranslucent
+        navigationBarTranslucent
         onRequestClose={() => setPermissionModalVisible(false)}
       >
         <View style={styles.modalOverlay}>
@@ -353,17 +476,14 @@ export default function CseSitesNearMe({ navigation }) {
             </View>
             <Text style={styles.permissionTitle}>Enable Location Services</Text>
             <Text style={styles.permissionDesc}>
-              We need access to your device location to search and display accredited PhilNITS partner testing venues and university testing centers near you.
+              We need access to your device location to show the PhilNITS testing venues closest to you. You can still browse every venue without it.
             </Text>
 
             <TouchableOpacity style={styles.allowButton} onPress={requestPermission}>
               <Text style={styles.allowButtonText}>Allow Access</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.denyButton} onPress={() => {
-              setPermissionModalVisible(false)
-              setLoading(false)
-            }}>
+            <TouchableOpacity style={styles.denyButton} onPress={() => setPermissionModalVisible(false)}>
               <Text style={styles.denyButtonText}>Not Now</Text>
             </TouchableOpacity>
           </View>
@@ -374,10 +494,7 @@ export default function CseSitesNearMe({ navigation }) {
 }
 
 const styles = StyleSheet.create({
-  screen: {
-    flex: 1,
-    backgroundColor: '#f5f7fb',
-  },
+  screen: { flex: 1, backgroundColor: '#f5f7fb' },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -388,81 +505,64 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
     paddingHorizontal: 16,
   },
-  backBtn: {
-    padding: 4,
-  },
+  backBtn: { padding: 4 },
   headerTitle: {
-    fontSize: 18,
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 17,
     fontWeight: '900',
     color: NAVY,
-    letterSpacing: 1,
+    letterSpacing: 0.8,
     textTransform: 'uppercase',
+    marginHorizontal: 6,
   },
-  placeholderBtn: {
-    width: 32,
-  },
-  centered: {
-    flex: 1,
-    justifyContent: 'center',
+  placeholderBtn: { width: 32 },
+  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20 },
+  loadingText: { marginTop: 12, color: '#64748b', fontSize: 14, fontWeight: '500' },
+  content: { flex: 1 },
+  map: { flex: 1, minHeight: 160, backgroundColor: '#e2e8f0' },
+  webview: { flex: 1, backgroundColor: '#e2e8f0' },
+  mapNotice: {
+    position: 'absolute',
+    top: 10,
+    alignSelf: 'center',
+    flexDirection: 'row',
     alignItems: 'center',
-    padding: 20,
+    backgroundColor: 'rgba(15,39,71,0.85)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
   },
-  loadingText: {
-    marginTop: 12,
-    color: '#64748b',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  content: {
-    flex: 1,
-  },
-  map: {
-    flex: 1,
-    minHeight: 350,
-  },
-  mapFallback: {
-    flex: 1,
-    backgroundColor: '#e2e8f0',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  fallbackText: {
-    marginTop: 10,
-    color: '#64748b',
-    fontSize: 14,
-  },
-  markerContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  markerPin: {
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowOffset: { width: 0, height: 2 },
-    shadowRadius: 4,
-    elevation: 4,
-  },
+  mapNoticeText: { color: '#fff', fontSize: 12, fontWeight: '700', marginLeft: 6 },
   sitesSheet: {
-    height: 250,
     backgroundColor: '#fff',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    padding: 20,
+    paddingTop: 18,
+    paddingHorizontal: 18,
     shadowColor: '#000',
     shadowOpacity: 0.1,
     shadowOffset: { width: 0, height: -3 },
     shadowRadius: 10,
     elevation: 10,
   },
-  sheetSectionTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: NAVY,
-    marginBottom: 12,
+  sheetTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  sheetSectionTitle: { fontSize: 16, fontWeight: '800', color: NAVY },
+  linkText: { fontSize: 12, fontWeight: '700', color: '#2563eb' },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#fef2f2',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginBottom: 10,
   },
-  sitesList: {
-    flex: 1,
-  },
+  errorBannerText: { flex: 1, fontSize: 12, color: '#991b1b', marginRight: 10 },
+  retryText: { fontSize: 12, fontWeight: '800', color: '#dc2626' },
+  emptyText: { textAlign: 'center', color: '#94a3b8', fontSize: 13, paddingVertical: 24 },
+  sitesList: { flex: 1 },
   siteItem: {
     padding: 14,
     borderRadius: 12,
@@ -471,43 +571,30 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#f1f5f9',
   },
-  siteItemActive: {
-    backgroundColor: '#eff6ff',
-    borderColor: '#bfdbfe',
-  },
-  siteItemHeader: {
+  siteItemActive: { backgroundColor: '#eff6ff', borderColor: '#bfdbfe' },
+  siteItemHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  siteName: { fontSize: 14, fontWeight: '700', color: NAVY, flex: 1, marginRight: 8 },
+  distanceBadge: { backgroundColor: NAVY, paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  distanceText: { fontSize: 10, color: '#fff', fontWeight: '700' },
+  siteAddress: { fontSize: 12, color: '#64748b', marginBottom: 3 },
+  sitePlace: { fontSize: 11, color: '#94a3b8', marginBottom: 3 },
+  sitePhone: { fontSize: 11, color: '#64748b' },
+  detailBlock: { marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: '#dbeafe' },
+  detailLine: { fontSize: 12, color: '#1e3a8a', marginBottom: 6 },
+  detailNotes: { fontSize: 12, color: '#475569', lineHeight: 17, marginBottom: 8 },
+  actionRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
+  actionBtn: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 4,
-  },
-  siteName: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: NAVY,
-    flex: 1,
-    marginRight: 8,
-  },
-  distanceBadge: {
+    justifyContent: 'center',
     backgroundColor: NAVY,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    gap: 6,
   },
-  distanceText: {
-    fontSize: 10,
-    color: '#fff',
-    fontWeight: '700',
-  },
-  siteAddress: {
-    fontSize: 12,
-    color: '#64748b',
-    marginBottom: 4,
-  },
-  sitePhone: {
-    fontSize: 11,
-    color: '#94a3b8',
-  },
+  actionBtnAlt: { backgroundColor: '#e0e7ff' },
+  actionBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(15, 39, 71, 0.4)',
@@ -521,6 +608,7 @@ const styles = StyleSheet.create({
     padding: 24,
     alignItems: 'center',
     width: '100%',
+    maxWidth: 420,
     shadowColor: '#000',
     shadowOpacity: 0.15,
     shadowOffset: { width: 0, height: 10 },
@@ -536,13 +624,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 20,
   },
-  permissionTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: NAVY,
-    marginBottom: 8,
-    textAlign: 'center',
-  },
+  permissionTitle: { fontSize: 20, fontWeight: '800', color: NAVY, marginBottom: 8, textAlign: 'center' },
   permissionDesc: {
     fontSize: 14,
     color: '#64748b',
@@ -551,27 +633,8 @@ const styles = StyleSheet.create({
     marginBottom: 24,
     paddingHorizontal: 10,
   },
-  allowButton: {
-    backgroundColor: NAVY,
-    width: '100%',
-    paddingVertical: 14,
-    borderRadius: 30,
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  allowButtonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '700',
-  },
-  denyButton: {
-    paddingVertical: 12,
-    width: '100%',
-    alignItems: 'center',
-  },
-  denyButtonText: {
-    color: '#64748b',
-    fontSize: 14,
-    fontWeight: '600',
-  },
+  allowButton: { backgroundColor: NAVY, width: '100%', paddingVertical: 14, borderRadius: 30, alignItems: 'center', marginBottom: 10 },
+  allowButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  denyButton: { paddingVertical: 12, width: '100%', alignItems: 'center' },
+  denyButtonText: { color: '#64748b', fontSize: 14, fontWeight: '600' },
 })

@@ -9,6 +9,30 @@ import { WebView } from 'react-native-webview'
 import { supabase } from '../../../utils/supabase'
 import { getCache, setCache } from '../../../utils/cache'
 import { withTimeout, writeOrQueue } from '../../../utils/queryHelper'
+import { resolveImageUrl } from '../../../utils/imageUrl'
+
+const MAX_INLINE_PDF_BYTES = 15 * 1024 * 1024
+
+/**
+ * Downloads the PDF with the app's own network stack (no browser CORS rules) and returns it as base64,
+ * so the viewer can open it from memory. Returns null when the file is too large to inline.
+ */
+async function fetchPdfAsBase64(url, timeoutMs = 45000) {
+  const res = await withTimeout(fetch(url), timeoutMs, 'The PDF took too long to download')
+  if (!res.ok) throw new Error(`Server returned ${res.status} for the PDF`)
+  const blob = await res.blob()
+  if (!blob || blob.size === 0) throw new Error('The PDF file is empty')
+  if (blob.size > MAX_INLINE_PDF_BYTES) return null
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      const result = String(reader.result || '')
+      resolve(result.slice(result.indexOf(',') + 1))
+    }
+    reader.onerror = () => reject(new Error('Could not read the downloaded PDF'))
+    reader.readAsDataURL(blob)
+  })
+}
 import { SkeletonItem } from '../../../components/Skeleton'
 import { calculateReadingPoints, recordPointsEntry } from '../../../utils/pointsEngine'
 
@@ -19,7 +43,7 @@ import { calculateReadingPoints, recordPointsEntry } from '../../../utils/points
  *
  * @param {string | null | undefined} rawUrl
  */
-function getWebViewSource(rawUrl) {
+function getWebViewSource(rawUrl, base64Data) {
   if (!rawUrl || typeof rawUrl !== 'string') return { uri: '' }
   const trimmed = rawUrl.trim()
 
@@ -115,10 +139,17 @@ function getWebViewSource(rawUrl) {
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
         const docUrl = ${JSON.stringify(trimmed)};
 
-        const loadingTask = pdfjsLib.getDocument({
-          url: docUrl,
-          withCredentials: false
-        });
+        const b64 = ${JSON.stringify(base64Data || '')};
+        let loadingTask;
+        if (b64) {
+          // PDF was downloaded by the app itself: open it from memory (no CORS / network issues in the viewer)
+          const bin = atob(b64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          loadingTask = pdfjsLib.getDocument({ data: bytes });
+        } else {
+          loadingTask = pdfjsLib.getDocument({ url: docUrl, withCredentials: false });
+        }
 
         loadingTask.promise.then(async function(pdf) {
           const loader = document.getElementById('loader');
@@ -127,7 +158,8 @@ function getWebViewSource(rawUrl) {
           const wrapper = document.getElementById('pages-wrapper');
           for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
             const page = await pdf.getPage(pageNum);
-            const scale = 2.0; // Render at 2x for sharp text on high-DPI mobile screens
+            // Sharp on phones, but lower for long documents so the WebView does not run out of memory
+            const scale = pdf.numPages > 40 ? 1.25 : 1.6;
             const viewport = page.getViewport({ scale: scale });
 
             const indicator = document.createElement('div');
@@ -178,6 +210,33 @@ export default function ReadingMaterial({ navigation, route }) {
   const [materialMeta, setMaterialMeta] = React.useState(null)
   const [loading, setLoading] = React.useState(true)
   const [hasRead, setHasRead] = React.useState(false)
+
+  // The stored value may be a full URL or a Supabase Storage path: always work with a loadable URL
+  const resolvedPdfUrl = React.useMemo(() => (pdfUrl ? resolveImageUrl(pdfUrl) : null), [pdfUrl])
+  const isDriveLink = Boolean(resolvedPdfUrl && resolvedPdfUrl.includes('drive.google.com'))
+  const needsInlinePdf = Platform.OS === 'android' && Boolean(resolvedPdfUrl) && !isDriveLink
+  const [pdfBase64, setPdfBase64] = React.useState(null)
+  const [pdfPreparing, setPdfPreparing] = React.useState(false)
+  const [pdfPrepError, setPdfPrepError] = React.useState(null)
+
+  // Android: download the PDF natively, then hand it to the viewer (fixes blank/CORS-blocked documents)
+  React.useEffect(() => {
+    if (!needsInlinePdf) return undefined
+    let cancelled = false
+    setPdfPreparing(true)
+    setPdfPrepError(null)
+    setPdfBase64(null)
+    fetchPdfAsBase64(resolvedPdfUrl)
+      .then((b64) => { if (!cancelled) setPdfBase64(b64) }) // null => too large, viewer streams it by URL instead
+      .catch((e) => { if (!cancelled) setPdfPrepError(e?.message || 'Could not download the PDF') })
+      .finally(() => { if (!cancelled) setPdfPreparing(false) })
+    return () => { cancelled = true }
+  }, [needsInlinePdf, resolvedPdfUrl])
+
+  const pdfSourceMemo = React.useMemo(
+    () => getWebViewSource(resolvedPdfUrl, pdfBase64),
+    [resolvedPdfUrl, pdfBase64]
+  )
 
   React.useEffect(() => {
     navigation.setParams({ hideNav: true })
@@ -321,7 +380,7 @@ export default function ReadingMaterial({ navigation, route }) {
     )
   }
 
-  const webViewSource = getWebViewSource(pdfUrl)
+  const webViewSource = pdfSourceMemo
   const displayTitle = materialMeta?.title || selectedTitle
 
   return (
@@ -353,7 +412,7 @@ export default function ReadingMaterial({ navigation, route }) {
             <TouchableOpacity
               style={styles.downloadTopBtn}
               activeOpacity={0.75}
-              onPress={() => Linking.openURL(pdfUrl)}
+              onPress={() => Linking.openURL(resolvedPdfUrl || pdfUrl)}
               hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
             >
               <Feather name="download" size={15} color="#13294b" />
@@ -379,7 +438,12 @@ export default function ReadingMaterial({ navigation, route }) {
       </View>
 
       {/* ── Direct PDF Document File View (Single Focus Option) ── */}
-      {pdfUrl ? (
+      {pdfUrl && needsInlinePdf && pdfPreparing ? (
+        <View style={styles.pdfLoadingContainer}>
+          <ActivityIndicator size="large" color="#13294b" />
+          <Text style={styles.pdfLoadingText}>Downloading document…</Text>
+        </View>
+      ) : pdfUrl ? (
         <View style={styles.pdfViewerContainer}>
           <WebView
             source={webViewSource}
@@ -405,7 +469,7 @@ export default function ReadingMaterial({ navigation, route }) {
                 <TouchableOpacity
                   style={styles.openExternalBtn}
                   activeOpacity={0.85}
-                  onPress={() => Linking.openURL(pdfUrl)}
+                  onPress={() => Linking.openURL(resolvedPdfUrl || pdfUrl)}
                 >
                   <Feather name="external-link" size={16} color="#fff" style={{ marginRight: 6 }} />
                   <Text style={styles.openExternalBtnText}>Open in Browser / Viewer</Text>
