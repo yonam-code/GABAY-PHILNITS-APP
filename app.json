@@ -2,6 +2,7 @@
   "expo": {
     "name": "Gabay PhilNITS",
     "slug": "gabay_philcse",
+    "owner": "yonams",
     "scheme": [
       "gabayphilcse",
       "gabay-philcse",
@@ -37,7 +38,7 @@
     ],
     "extra": {
       "eas": {
-        "projectId": "b5909ad9-e928-4b90-aeeb-af2966fb4339"
+        "projectId": "f399ac4d-bcbd-4cdf-8aa3-380d0d0964f5"
       }
     }
   }
