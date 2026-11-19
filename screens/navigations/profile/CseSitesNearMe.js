@@ -23,21 +23,27 @@ const DEFAULT_CENTER = { latitude: 14.5995, longitude: 120.9842 } // Manila
 
 // Last-resort list, used ONLY when the venues table has never been loaded (no connection and no saved copy,
 // or supabase_testing_venues.sql has not been run yet). Live Supabase data always replaces it.
+// Official exam sites from https://philnits.org/exam-site/ (fallback only; live data comes from Supabase)
 const BUILTIN_SITES = [
-  { id: 'b1', name: 'PhilNITS Foundation Headquarters', address: '3/F Oppen Bldg, 349 Sen. Gil Puyat Ave, Makati City', lat: 14.5606, lng: 121.0189, phone: '(02) 8890-5026' },
-  { id: 'b2', name: 'UP Diliman (Dept. of Computer Science)', address: 'Engineering Complex, UP Diliman, Quezon City', lat: 14.6538, lng: 121.0685, phone: '(02) 8981-8500' },
-  { id: 'b3', name: 'Ateneo de Manila University (DISCS)', address: 'Katipunan Ave, Loyola Heights, Quezon City', lat: 14.6396, lng: 121.0775, phone: '(02) 8426-6001' },
-  { id: 'b4', name: 'De La Salle University (CCS)', address: '2401 Taft Ave, Malate, Manila', lat: 14.5648, lng: 120.9932, phone: '(02) 8524-4611' },
-  { id: 'b5', name: 'University of Santo Tomas (CICS)', address: 'España Blvd, Sampaloc, Manila', lat: 14.6095, lng: 120.9898, phone: '(02) 8786-1611' },
-  { id: 'b6', name: 'Mapúa University (School of IT)', address: 'Muralla St, Intramuros, Manila', lat: 14.5905, lng: 120.9779, phone: '(02) 8247-5000' },
-  { id: 'b7', name: 'Saint Louis University (Baguio)', address: 'A. Bonifacio St, Baguio City, Benguet', lat: 16.4178, lng: 120.5985, phone: '(074) 442-2793' },
-  { id: 'b8', name: 'Angeles University Foundation (AUF)', address: 'MacArthur Hwy, Angeles City, Pampanga', lat: 15.1451, lng: 120.5935, phone: '(045) 625-2888' },
-  { id: 'b9', name: 'University of Saint Louis (Tuguegarao)', address: 'Mabini St, Tuguegarao City, Cagayan', lat: 17.6186, lng: 121.7303, phone: '(078) 844-1872' },
-  { id: 'b10', name: 'Cebu Institute of Technology - University', address: 'N. Bacalso Ave, Cebu City', lat: 10.2946, lng: 123.8809, phone: '(032) 261-7741' },
-  { id: 'b11', name: 'University of San Carlos (Talamban)', address: 'Gov. M. Cuenco Ave, Cebu City', lat: 10.3541, lng: 123.9130, phone: '(032) 230-0100' },
-  { id: 'b12', name: 'Iloilo Science & Technology University', address: 'Burgos St, La Paz, Iloilo City', lat: 10.7169, lng: 122.5648, phone: '(033) 320-7190' },
-  { id: 'b13', name: 'Ateneo de Davao University', address: 'E. Jacinto St, Poblacion District, Davao City', lat: 7.0722, lng: 125.6128, phone: '(082) 221-2411' },
-  { id: 'b14', name: 'Xavier University - Ateneo de Cagayan', address: '73 Corrales Ave, Cagayan de Oro City', lat: 8.4776, lng: 124.6468, phone: '(088) 853-9800' },
+  { id: 'b1', name: "Philippine Christian University (PCU)", address: "1648 Taft Ave, Malate, Manila, 1004 Metro Manila", lat: 14.575564, lng: 120.989159, phone: null },
+  { id: 'b2', name: "University of St. La Salle - Bacolod City", address: "La Salle Avenue corner San Agustin Dr, Bacolod, 6100 Negros Occidental", lat: 10.678417, lng: 122.962484, phone: null },
+  { id: 'b3', name: "University of Negros Occidental – Recoletos", address: "#51 Lizares St, Bacolod, 6100 Negros Occidental", lat: 10.656413, lng: 122.947967, phone: null },
+  { id: 'b4', name: "University of the Cordilleras (UC)", address: "Gov. Pack Road, Baguio City, Benguet", lat: 16.408455, lng: 120.597928, phone: null },
+  { id: 'b5', name: "Batangas State University - Lipa Campus", address: "Lipa City, Batangas", lat: 13.956658, lng: 121.163273, phone: null },
+  { id: 'b6', name: "Batangas State University - Malvar Campus", address: "Malvar, Batangas", lat: 14.044912, lng: 121.156329, phone: null },
+  { id: 'b7', name: "Batangas State University - Nasugbu Campus", address: "R. Martinez St, Bucana, Nasugbu, Batangas", lat: 14.067242, lng: 120.626724, phone: null },
+  { id: 'b8', name: "Holy Name University - Dampas Campus", address: "Dampas, Tagbilaran City, Bohol 6300", lat: 9.649598, lng: 123.8679, phone: null },
+  { id: 'b9', name: "Camarines Sur Polytechnic Colleges", address: "San Miguel, Nabua, Camarines Sur", lat: 13.405818, lng: 123.376338, phone: null },
+  { id: 'b10', name: "University of San Carlos - Talamban Campus", address: "Talamban, Cebu City", lat: 10.355938, lng: 123.907154, phone: null },
+  { id: 'b11', name: "University of Cebu - Main Campus", address: "Sanciangko St, Cebu City, 6000 Cebu", lat: 10.297446, lng: 123.896292, phone: null },
+  { id: 'b12', name: "University of Cebu - Banilad Campus", address: "Gov. M. Cuenco Ave, Banilad, Cebu City, 6000 Cebu", lat: 10.338154, lng: 123.911471, phone: null },
+  { id: 'b13', name: "Foundation University", address: "Dr. Meciano Road, Dumaguete City, Negros Oriental", lat: 9.305209, lng: 123.299915, phone: null },
+  { id: 'b14', name: "Colegio de Santa Rita", address: "San Carlos City, Negros Occidental", lat: 10.495526, lng: 123.424692, phone: null },
+  { id: 'b15', name: "Don Mariano Marcos Memorial State University - Mid La Union Campus (College of Information Technology)", address: "Catbangen, San Fernando City, La Union", lat: 16.613938, lng: 120.314431, phone: null },
+  { id: 'b16', name: "Saint Joseph College of Maasin", address: "Tunga-tunga, Maasin City, Southern Leyte 6600", lat: 10.133433, lng: 124.837676, phone: null },
+  { id: 'b17', name: "La Salle University - Ozamiz", address: "Valconcha St., Ozamiz City, Misamis Occidental", lat: 8.149351, lng: 123.8471, phone: null },
+  { id: 'b18', name: "Carlos Hilado Memorial State University - Talisay", address: "Mabini Street, Talisay City, Negros Occidental", lat: 10.742615, lng: 122.970323, phone: null },
+  { id: 'b19', name: "Visayas State University", address: "Visca, Baybay City, Leyte", lat: 10.745887, lng: 124.794771, phone: null },
 ]
 
 // ── helpers ──────────────────────────────────────────────────────────────

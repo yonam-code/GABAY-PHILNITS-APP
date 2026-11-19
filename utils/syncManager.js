@@ -1,14 +1,37 @@
 import NetInfo from '@react-native-community/netinfo'
 import {
     getPendingSyncItems, markSyncItemCompleted, markSyncItemFailed,
-    getUnsyncedPoints, markPointsSynced, cacheQuestionsLocally, pruneCompletedSyncItems,
+    getUnsyncedPoints, markPointsSynced, cacheQuestionsLocally, pruneCompletedSyncItems, getSyncQueueStats,
 } from './database'
 import { getCache, setCache } from './cache'
 import { supabase } from './supabase'
 import { escapeLike } from './emailMatch'
+import { hasInternet } from './connectivity'
 
 let isSyncing = false
+let rerunRequested = false
+let retryTimer = null
+let retryAttempt = 0
+let lastStatus = { status: 'IDLE', count: 0 }
 const syncListeners = new Set()
+
+// Real connectivity: "connected to Wi-Fi" is not enough if the internet itself is unreachable
+// Synchronous best guess from a NetInfo state (null/unknown counts as online; use hasInternet() to be sure)
+export const isOnlineState = (state) => state?.isConnected !== false && state?.isInternetReachable !== false
+
+export const getLastSyncStatus = () => lastStatus
+
+// Retry pending items with backoff (15s, 30s, 60s ... max 5 min) while online
+const scheduleRetry = () => {
+    if (retryTimer) return
+    const delay = Math.min(15000 * Math.pow(2, retryAttempt), 5 * 60 * 1000)
+    retryAttempt += 1
+    retryTimer = setTimeout(() => { retryTimer = null; processSyncQueue() }, delay)
+}
+const clearRetry = () => {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null }
+    retryAttempt = 0
+}
 
 export const addSyncListener = (cb) => {
     syncListeners.add(cb)
@@ -16,6 +39,7 @@ export const addSyncListener = (cb) => {
 }
 
 const notifySyncListeners = (status, count = 0) => {
+    lastStatus = { status, count }
     syncListeners.forEach(cb => {
         try { cb({ status, count, isSyncing }) } catch (_) {}
     })
@@ -98,15 +122,28 @@ export const runQueueItem = async (item, payload, options) => {
     return { discard: true }
 }
 
+/**
+ * Uploads queued offline changes. Status events:
+ *   SYNCING   – upload in progress
+ *   COMPLETED – the server confirmed every queued change (queue + points are empty afterwards)
+ *   PENDING   – some changes are still waiting (offline, connection dropped, or a retryable server error)
+ *   ERROR     – some changes were rejected by the server after all retries
+ *   OFFLINE   – nothing attempted because there is no internet
+ *   IDLE      – nothing to sync
+ */
 export const processSyncQueue = async () => {
-    // Prevent multiple sync processes running at the same time
-    if (isSyncing) return
+    // Prevent multiple sync processes running at the same time; remember to run again afterwards
+    if (isSyncing) { rerunRequested = true; return }
     isSyncing = true
     let didWork = false
+    let offline = false
+    let pointsFailed = false
+    let hadError = false
+    const deadBefore = (await getSyncQueueStats()).dead
 
     try {
         const state = await NetInfo.fetch()
-        if (!state.isConnected) return
+        if (!(await hasInternet(state))) { offline = true; return }
 
         const pendingItems = await getPendingSyncItems()
         const unsyncedPtsPreview = await getUnsyncedPoints()
@@ -143,7 +180,7 @@ export const processSyncQueue = async () => {
             }
         }
 
-        if (offlineAgain) return // connection dropped mid-sync; remaining items stay queued
+        if (offlineAgain) { offline = true; return } // connection dropped mid-sync; remaining items stay queued
 
         // --- POINTS SYNC LOGIC ---
         const unsyncedPoints = await getUnsyncedPoints()
@@ -171,6 +208,8 @@ export const processSyncQueue = async () => {
                 if (rpcError) {
                     const { error: insertError } = await supabase.from('points_ledger').insert(payload)
                     if (insertError) {
+                        pointsFailed = true
+                        if (isNetworkError(insertError)) offline = true
                         console.warn('Failed to sync points to Supabase points_ledger:', insertError?.message || insertError)
                     } else {
                         syncSucceeded = true
@@ -188,11 +227,42 @@ export const processSyncQueue = async () => {
         await pruneCompletedSyncItems()
     } catch (error) {
         console.warn('Error during sync process:', error?.message || error)
-        if (didWork) notifySyncListeners('ERROR', 0)
+        hadError = true
+        if (isNetworkError(error)) offline = true
     } finally {
+        // Decide the status from what is ACTUALLY left locally, not from "we tried"
+        let remaining = 0
+        let deadNow = deadBefore
+        let pointsLeft = 0
+        try {
+            const stats = await getSyncQueueStats()
+            remaining = stats.pending
+            deadNow = stats.dead
+            pointsLeft = (await getUnsyncedPoints()).length
+        } catch (_) {}
+        const waiting = remaining + pointsLeft
         isSyncing = false
-        // Only announce "synced" when something was actually attempted
-        notifySyncListeners(didWork ? 'COMPLETED' : 'IDLE', 0)
+
+        if (offline) {
+            notifySyncListeners(waiting > 0 ? 'OFFLINE' : 'IDLE', waiting)
+        } else if (deadNow > deadBefore) {
+            notifySyncListeners('ERROR', deadNow - deadBefore)
+            if (waiting > 0) scheduleRetry()
+        } else if (waiting > 0 || pointsFailed || hadError) {
+            notifySyncListeners('PENDING', waiting)
+            scheduleRetry()
+        } else if (didWork) {
+            clearRetry()
+            notifySyncListeners('COMPLETED', 0)
+        } else {
+            clearRetry()
+            notifySyncListeners('IDLE', 0)
+        }
+
+        if (rerunRequested) {
+            rerunRequested = false
+            setTimeout(() => { processSyncQueue() }, 300)
+        }
     }
 }
 

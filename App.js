@@ -10,7 +10,7 @@ import PersonalInfo from './screens/onboarding/PersonalInfo'
 import DiagnosticAssessment from './screens/onboarding/DiagnosticAssessment'
 import Home from './screens/navigations/home/Home'
 import StudyPlan from './screens/navigations/study/StudyPlan'
-import Library from './screens/navigations/study/Library'
+import Library, { warmLibraryCache } from './screens/navigations/study/Library'
 import ReadingMaterial from './screens/navigations/study/ReadingMaterial'
 import VideoLectureDetail from './screens/navigations/study/VideoLectureDetail'
 import RecentReads from './screens/navigations/study/RecentReads'
@@ -50,6 +50,7 @@ import NetInfo from '@react-native-community/netinfo'
 import { initDb, getUserCache, saveUserCache, saveUserSession, getActiveUserSession, clearUserSession } from './utils/database'
 import { clearCache } from './utils/cache'
 import { processSyncQueue, addSyncListener, precachePracticeContent } from './utils/syncManager'
+import { hasInternet, looksOffline } from './utils/connectivity'
 import { startRealtimeNotifications, stopRealtimeNotifications } from './utils/notificationManager'
 
 const Stack = createNativeStackNavigator()
@@ -111,7 +112,7 @@ export default function App() {
 		}
 		try {
 			const net = await NetInfo.fetch()
-			if (!net.isConnected) return
+			if (!(await hasInternet(net))) return
 			const { data, error } = await supabase.auth.getSession()
 			if (error) {
 				const errMsg = (error.message || '').toLowerCase()
@@ -145,7 +146,7 @@ export default function App() {
 	const determineInitialRoute = async () => {
 		try {
 			const netState = await NetInfo.fetch()
-			const isOnline = Boolean(netState.isConnected)
+			const isOnline = await hasInternet(netState)
 			setIsOffline(!isOnline)
 
 			// Fast path: known, fully-onboarded user -> start instantly, verify in the background
@@ -264,6 +265,7 @@ export default function App() {
 	useEffect(() => {
 		const init = async () => {
 			await initDb()
+			warmLibraryCache() // load the saved shelf into memory now so the Library opens instantly
 			const route = await determineInitialRoute()
 			setInitialRoute(route)
 			setCurrentRoute(route)
@@ -327,14 +329,32 @@ export default function App() {
 	}, [])
 
 	useEffect(() => {
-		const unsubscribeNet = NetInfo.addEventListener(state => {
-			const offline = !state.isConnected
-			setIsOffline(offline)
-			if (!offline) {
+		let wasOffline = null
+		let offlineTimer = null
+		let wentOfflineThisSession = false // were there real offline moments whose changes we are now syncing?
+		const goOnline = () => {
+			setIsOffline(false)
+			// Only kick off a sync when we actually (re)gain internet, not on every network event
+			if (wasOffline !== false) {
 				processSyncQueue()
 				// Download practice content for offline use shortly after connecting (throttled to once / 12h)
 				setTimeout(() => { precachePracticeContent().catch(() => {}) }, 5000)
 			}
+			wasOffline = false
+		}
+		const unsubscribeNet = NetInfo.addEventListener(state => {
+			if (offlineTimer) { clearTimeout(offlineTimer); offlineTimer = null }
+			if (!looksOffline(state)) { goOnline(); return }
+			// Looks offline: confirm (short grace period + a real request to our server) before telling the user.
+			// Prevents a false "You're offline" right after sign-in or on networks that block Google's probe.
+			offlineTimer = setTimeout(async () => {
+				offlineTimer = null
+				const online = await hasInternet(await NetInfo.fetch().catch(() => state))
+				if (online) { goOnline(); return }
+				setIsOffline(true)
+				wasOffline = true
+				wentOfflineThisSession = true
+			}, state.isConnected === false ? 1200 : 2500)
 		})
 
 		// Flush queued offline changes whenever the app returns to the foreground
@@ -342,16 +362,47 @@ export default function App() {
 			if (nextState === 'active') processSyncQueue()
 		})
 
-		const unsubscribeSync = addSyncListener(({ status }) => {
+		// Banner reflects what the server actually confirmed (see processSyncQueue status docs).
+		// Routine background uploads while online (e.g. right after sign-in) stay silent: the
+		// "Syncing" banner only appears for changes made offline, or when an upload takes noticeably long.
+		let syncedTimer = null
+		let showSyncingTimer = null
+		let syncingShown = false
+		const unsubscribeSync = addSyncListener(({ status, count }) => {
+			if (syncedTimer) { clearTimeout(syncedTimer); syncedTimer = null }
+			if (status !== 'SYNCING' && showSyncingTimer) { clearTimeout(showSyncingTimer); showSyncingTimer = null }
 			if (status === 'SYNCING') {
-				setSyncNotice('syncing')
+				if (showSyncingTimer) clearTimeout(showSyncingTimer)
+				showSyncingTimer = setTimeout(() => {
+					showSyncingTimer = null
+					syncingShown = true
+					setSyncNotice({ type: 'syncing', count })
+				}, wentOfflineThisSession ? 0 : 2000)
 			} else if (status === 'COMPLETED') {
-				setSyncNotice('synced')
-				setTimeout(() => setSyncNotice(null), 3500)
+				if (syncingShown || wentOfflineThisSession) {
+					setSyncNotice({ type: 'synced', count: 0 })
+					syncedTimer = setTimeout(() => setSyncNotice(null), 3500)
+				} else {
+					setSyncNotice(null)
+				}
+				syncingShown = false
+				wentOfflineThisSession = false
+			} else if (status === 'PENDING') {
+				setSyncNotice({ type: 'pending', count })
+			} else if (status === 'ERROR') {
+				setSyncNotice({ type: 'error', count })
+				syncedTimer = setTimeout(() => setSyncNotice(null), 6000)
+			} else if (status === 'OFFLINE') {
+				setSyncNotice({ type: 'waiting', count })
+			} else {
+				setSyncNotice(null)
 			}
+			if (status !== 'SYNCING' && status !== 'COMPLETED') syncingShown = false
 		})
 
 		return () => {
+			if (offlineTimer) clearTimeout(offlineTimer)
+			if (showSyncingTimer) clearTimeout(showSyncingTimer)
 			unsubscribeNet()
 			unsubscribeSync()
 			appStateSub.remove()

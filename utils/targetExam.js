@@ -119,9 +119,8 @@ export async function setUserTargetExamTrack(track, user = null) {
     await setCache('user_target_exam', normTrack, 30 * 24 * 60 * 60 * 1000)
     await setCache('library_target_exam', normTrack, 30 * 24 * 60 * 60 * 1000)
 
-    // 2. Invalidate old reading materials & videos cache so new curriculum loads fresh
-    await setCache('library_materials', null)
-    await setCache('library_videos', null)
+    // 2. The saved Library holds every track and is filtered on the device, so it stays valid
+    //    when the target exam changes (wiping it here used to leave the Library empty offline)
 
     // 3. Update SQLite session
     let currentUser = user

@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import {
-  Image, ScrollView, StyleSheet, Text, TouchableOpacity,
+  Image, ScrollView, FlatList, StyleSheet, Text, TouchableOpacity,
   View, ActivityIndicator, TextInput, Platform, Linking, StatusBar, RefreshControl
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -12,6 +12,8 @@ import { getCache, setCache, clearCache } from '../../../utils/cache'
 import { withTimeout } from '../../../utils/queryHelper'
 import { getScrollBottomPadding } from '../../../utils/responsiveLayout'
 import { resolveUserTargetExam } from '../../../utils/targetExam'
+import { precachePdfs } from '../../../utils/offlineFiles'
+import { hasInternet } from '../../../utils/connectivity'
 
 
 const NAVY = '#13294b'
@@ -637,38 +639,64 @@ function DefaultBookCover({ item }) {
  *
  * @param {{ item: any, onPress: any }} props
  */
-// id -> cover_image_url, loaded on its own (the main shelf query leaves this column out)
-async function fetchCoverMap() {
-  const cacheKey = 'library_cover_map'
+// Columns the shelf needs. cover_image_url is a short Storage URL, so it ships with the books.
+// Excluded on purpose: `description` (full extracted PDF text, ~100KB per row) and `thumbnail_url` (may hold base64).
+const MATERIAL_LIST_COLUMNS = 'id, title, subtitle, author, subject, exam_level, fe_section, pdf_url, cover_image_url, sort_order, total_pages, learning_objective, is_published, created_at, chapter'
+
+// Legacy rows that only have thumbnail_url: fetched only for those ids
+async function fetchLegacyCovers(ids) {
   try {
     const res = await withTimeout(
-      supabase.from('reading_materials').select('id, cover_image_url').eq('is_published', true).not('cover_image_url', 'is', null),
+      supabase.from('reading_materials').select('id, thumbnail_url').in('id', ids).not('thumbnail_url', 'is', null),
       12000
     )
-    if (res?.error) throw res.error
     const map = {}
-    ;(res?.data || []).forEach((r) => { if (r?.id && r.cover_image_url) map[r.id] = r.cover_image_url })
-    if (Object.keys(map).length > 0) setCache(cacheKey, map, 24 * 60 * 60 * 1000).catch(() => { })
+    ;(res?.data || []).forEach((r) => { if (r?.id && r.thumbnail_url) map[r.id] = r.thumbnail_url })
     return map
   } catch (_) {
-    return (await getCache(cacheKey)) || null
+    return null
   }
 }
 
-// Video thumbnail with fallbacks: stored URL -> YouTube hqdefault -> mqdefault -> neutral placeholder
-function VideoThumb({ thumb, youtubeId, style }) {
-  const sources = [
-    resolveImageUrl(thumb),
-    youtubeId ? `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg` : null,
+// Warm the native image disk cache so covers appear instantly (and keep showing offline)
+const _prefetched = new Set()
+function prefetchUrls(urls) {
+  urls.forEach((u) => {
+    if (!u || _prefetched.has(u) || /^data:/i.test(u)) return
+    _prefetched.add(u)
+    Image.prefetch(u).catch(() => { _prefetched.delete(u) })
+  })
+}
+function prefetchCovers(list) {
+  prefetchUrls((list || []).map((m) => resolveImageUrl(m.cover_image_url || m.cover_url || m.thumbnail_url || m.image_url)))
+}
+function prefetchVideoThumbs(list) {
+  // only the first few per screen; the rest load as they scroll into view
+  prefetchUrls((list || []).slice(0, 12).map((v) => videoThumbSources(v.thumbnail_url, v.youtube_id)[0]))
+}
+
+// YouTube thumbnails: use the 320x180 "mqdefault" (16:9, ~4x smaller than hqdefault, no black bars)
+function videoThumbSources(thumb, youtubeId) {
+  const stored = resolveImageUrl(thumb)
+  const light = stored ? stored.replace(/\/(hq|sd|maxres)default\.jpg/i, '/mqdefault.jpg') : null
+  return [
+    light,
+    stored !== light ? stored : null,
     youtubeId ? `https://i.ytimg.com/vi/${youtubeId}/mqdefault.jpg` : null,
-  ].filter(Boolean)
+    youtubeId ? `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg` : null,
+  ].filter((u, i, arr) => u && arr.indexOf(u) === i)
+}
+
+// Video thumbnail with fallbacks: light stored URL -> stored URL -> YouTube mq/hq -> neutral placeholder
+const VideoThumb = React.memo(function VideoThumb({ thumb, youtubeId, style }) {
+  const sources = React.useMemo(() => videoThumbSources(thumb, youtubeId), [thumb, youtubeId])
   const [stage, setStage] = useState(0)
   useEffect(() => { setStage(0) }, [thumb, youtubeId])
   if (stage >= sources.length) return <View style={[style, { backgroundColor: '#1e293b' }]} />
-  return <Image source={{ uri: sources[stage] }} style={style} onError={() => setStage((s) => s + 1)} />
-}
+  return <Image source={{ uri: sources[stage] }} style={style} fadeDuration={0} onError={() => setStage((s) => s + 1)} />
+})
 
-function MaterialCard({ item, onPress }) {
+const MaterialCard = React.memo(function MaterialCard({ item, onPress }) {
   const [imageError, setImageError] = useState(false)
   const coverUrl = resolveImageUrl(item.cover_image_url || item.cover_url || item.thumbnail_url || item.image_url)
   useEffect(() => { setImageError(false) }, [coverUrl])
@@ -679,7 +707,7 @@ function MaterialCard({ item, onPress }) {
     <TouchableOpacity
       style={styles.bookCard}
       activeOpacity={0.88}
-      onPress={onPress}
+      onPress={() => onPress(item)}
     >
       <View style={styles.bookWrapper}>
         {hasValidImage ? (
@@ -687,6 +715,7 @@ function MaterialCard({ item, onPress }) {
             source={{ uri: coverUrl }}
             style={styles.bookImage}
             resizeMode="cover"
+            fadeDuration={0}
             onError={() => setImageError(true)}
           />
         ) : (
@@ -709,7 +738,7 @@ function MaterialCard({ item, onPress }) {
       </View>
     </TouchableOpacity>
   )
-}
+})
 
 // ─── Skeleton Loading Component for Library ───────────────────
 function LibrarySkeleton({ libraryMode, isFE }) {
@@ -824,6 +853,27 @@ let _memoryCachedMaterials = null
 let _memoryCachedVideos = null
 let _memoryCachedTargetExam = null
 let _lastLibraryFetchTime = 0
+let _libraryLoadInFlight = false
+
+/**
+ * Loads the saved shelf (books, videos, track) from the device into memory.
+ * Called once at app start, so the very first Library open renders instantly with no skeleton.
+ */
+export async function warmLibraryCache() {
+  if (_memoryCachedMaterials && _memoryCachedMaterials.length > 0) return
+  try {
+    const [cachedTrack, userTrack, cachedMaterials, cachedVideos] = await Promise.all([
+      getCache('library_target_exam'), getCache('user_target_exam'), getCache('library_materials'), getCache('library_videos'),
+    ])
+    if (_memoryCachedMaterials && _memoryCachedMaterials.length > 0) return // a live load won the race
+    if (cachedTrack || userTrack) _memoryCachedTargetExam = cachedTrack || userTrack
+    if (Array.isArray(cachedMaterials) && cachedMaterials.length > 0) {
+      _memoryCachedMaterials = cachedMaterials
+      prefetchCovers(cachedMaterials)
+    }
+    if (Array.isArray(cachedVideos) && cachedVideos.length > 0) _memoryCachedVideos = cachedVideos
+  } catch (_) { }
+}
 
 /**
  * @param {{ navigation: any }} props
@@ -844,6 +894,19 @@ export default function Library({ navigation }) {
   const [feSection, setFeSection] = useState('FE Subject A')
 
   const isFE = (userTargetExam || '').toLowerCase().includes('fe')
+
+  // Stable handler so memoized book cards don't re-render on every keystroke/filter change
+  const openMaterial = useCallback((item) => {
+    navigation?.navigate('ReadingMaterial', {
+      materialId: item.id,
+      title: item.title,
+      subject: item.subject,
+      learningObjective: item.learning_objective,
+      pdfUrl: item.pdf_url,
+      coverImageUrl: item.cover_image_url || item.cover_url || item.thumbnail_url,
+      totalPages: item.total_pages || 1,
+    })
+  }, [navigation])
 
   // Immediately resolve target exam from persistent cache / SQLite session on mount
   useEffect(() => {
@@ -896,19 +959,16 @@ export default function Library({ navigation }) {
   }, [navigation, materials.length])
 
   const onRefresh = async () => {
+    // Refresh replaces the saved shelf only when fresh data actually arrives —
+    // it never wipes it first (pulling to refresh while offline used to empty the Library)
     setRefreshing(true)
-    _memoryCachedMaterials = null
-    _memoryCachedVideos = null
-    _memoryCachedTargetExam = null
-    _lastLibraryFetchTime = 0
-    await clearCache('library_materials')
-    await clearCache('library_videos')
-    await clearCache('library_target_exam')
+    _lastLibraryFetchTime = Date.now()
     await loadMaterials(true)
     setRefreshing(false)
   }
 
   const loadMaterials = async (forceRefresh = false) => {
+    let ownsLoad = false
     try {
       setError(null)
 
@@ -946,25 +1006,36 @@ export default function Library({ navigation }) {
             setLoading(true)
           }
         }
-      } else {
+      } else if (!hasCachedData) {
+        // forced refresh: keep the current shelf visible; only show the skeleton when there is nothing yet
         setLoading(true)
       }
 
-      // 2. Concurrently fetch all dependencies in parallel
-      // Note: We deliberately exclude the bulky thumbnail_url column (which contains 50KB+ base64 strings)
-      // to keep the payload under 30KB and load the shelf in < 400ms. DefaultBookCover renders native vector art.
-      const [vRes, rRes, progRes, resolvedTrack] = await Promise.allSettled([
-        withTimeout(supabase.from('video_lectures').select('id, title, subject, duration_minutes, url, youtube_id, thumbnail_url, author, author_url, description, exam_level, fe_section, sort_order').eq('is_published', true).order('sort_order', { ascending: true }), 15000),
-        withTimeout(supabase.from('reading_materials').select('id, title, subtitle, author, subject, exam_level, fe_section, pdf_url, sort_order, total_pages, learning_objective, is_published, created_at, chapter').eq('is_published', true).order('subject').order('sort_order'), 15000),
-        uid ? withTimeout(supabase.from('user_reading_progress').select('reading_material_id, is_completed, current_chapter_number').eq('user_id', uid), 10000) : Promise.resolve({ data: [] }),
-        resolveUserTargetExam(uid, userTargetExam)
-      ])
+      // Offline: the saved shelf is already on screen; don't sit through network timeouts
+      if (!(await hasInternet())) {
+        if (!(_memoryCachedMaterials && _memoryCachedMaterials.length > 0)) {
+          setVideos((prev) => (prev && prev.length > 0 ? prev : VIDEO_LECTURES))
+        }
+        return
+      }
 
-      // Determine track strictly using unified resolver
-      const targetTrack = (resolvedTrack.status === 'fulfilled' && resolvedTrack.value)
-        ? resolvedTrack.value
-        : userTargetExam
-      setUserTargetExam(targetTrack)
+      // One network refresh at a time (focus + pull-to-refresh can fire together)
+      if (_libraryLoadInFlight && !forceRefresh) return
+      _libraryLoadInFlight = true
+      ownsLoad = true
+
+      // 2. Concurrently fetch all dependencies in parallel.
+      // The shelf query includes cover_image_url (a short Storage URL) so covers arrive with the books.
+      // The huge `description` column (full PDF text) and `thumbnail_url` (may hold base64) are left out.
+      // Track + progress are started now but do NOT block the shelf from rendering.
+      const trackPromise = resolveUserTargetExam(uid, userTargetExam).catch(() => null)
+      const progPromise = uid
+        ? withTimeout(supabase.from('user_reading_progress').select('reading_material_id, is_completed, current_chapter_number').eq('user_id', uid), 10000).catch(() => ({ data: [] }))
+        : Promise.resolve({ data: [] })
+      const [vRes, rRes] = await Promise.allSettled([
+        withTimeout(supabase.from('video_lectures').select('id, title, subject, duration_minutes, url, youtube_id, thumbnail_url, author, author_url, description, exam_level, fe_section, sort_order').eq('is_published', true).order('sort_order', { ascending: true }), 15000),
+        withTimeout(supabase.from('reading_materials').select(MATERIAL_LIST_COLUMNS).eq('is_published', true).order('subject').order('sort_order'), 15000),
+      ])
 
       // Videos
       let finalVideos = VIDEO_LECTURES
@@ -972,25 +1043,31 @@ export default function Library({ navigation }) {
         finalVideos = vRes.value.data
       }
       setVideos(finalVideos)
+      prefetchVideoThumbs(finalVideos)
 
-      // Reading progress
-      const progressList = (progRes.status === 'fulfilled' && Array.isArray(progRes.value?.data)) ? progRes.value.data : []
-      const progressMap = {}
-      progressList.forEach(p => {
-        if (p?.reading_material_id) progressMap[p.reading_material_id] = p
-      })
+      // Track resolves in parallel; usually already done by the time the shelf query returns
+      const resolvedTrack = await Promise.race([trackPromise, new Promise((r) => setTimeout(() => r(null), 1500))])
+      let targetTrack = resolvedTrack || userTargetExam
+      setUserTargetExam(targetTrack)
+      if (!resolvedTrack) {
+        trackPromise.then((trk) => {
+          if (trk && trk !== targetTrack) {
+            _memoryCachedTargetExam = trk
+            setUserTargetExam(trk)
+            setCache('library_target_exam', trk).catch(() => { })
+          }
+        })
+      }
 
-      // Reading materials: if the comprehensive query timed out on slow/public networks,
-      // load metadata-only without large base64 thumbnails instantly (takes ~300ms)
+      // Reading materials: one retry if the first attempt failed on a flaky network
       let rawMaterials = (rRes.status === 'fulfilled' && Array.isArray(rRes.value?.data)) ? rRes.value.data : []
       if (rawMaterials.length === 0 && (rRes.status === 'rejected' || rRes.value?.error)) {
         try {
-          const fallbackRes = await supabase.from('reading_materials')
-            .select('id, title, subtitle, author, subject, exam_level, fe_section, pdf_url, sort_order, total_pages, learning_objective, is_published, created_at, chapter')
-            .eq('is_published', true)
-            .order('subject')
-            .order('sort_order')
-          if (Array.isArray(fallbackRes.data) && fallbackRes.data.length > 0) {
+          const fallbackRes = await withTimeout(
+            supabase.from('reading_materials').select(MATERIAL_LIST_COLUMNS).eq('is_published', true).order('subject').order('sort_order'),
+            15000
+          )
+          if (Array.isArray(fallbackRes?.data) && fallbackRes.data.length > 0) {
             rawMaterials = fallbackRes.data
           }
         } catch (fbErr) {
@@ -998,37 +1075,65 @@ export default function Library({ navigation }) {
         }
       }
 
-      const materialsWithProgress = rawMaterials.map(item => {
-        const prog = progressMap[item.id]
-        if (prog) {
-          if (prog.is_completed) {
-            return { ...item, progress: 100 }
-          }
-          if (prog.current_chapter_number && item.total_pages > 0) {
-            const computed = Math.round(((prog.current_chapter_number - 1) / item.total_pages) * 100)
-            return { ...item, progress: Math.min(Math.max(computed, 0), 100) }
-          }
-        }
-        return { ...item, progress: 0 }
-      })
+      // Never lose a cover we already know (e.g. from cache) if a row comes back without one
+      const knownCovers = {}
+      ;(_memoryCachedMaterials || []).forEach((m) => { if (m?.id && m.cover_image_url) knownCovers[m.id] = m.cover_image_url })
+      const previousProgress = {}
+      ;(_memoryCachedMaterials || []).forEach((m) => { if (m?.id && m.progress) previousProgress[m.id] = m.progress })
+      const baseMaterials = rawMaterials.map((item) => ({
+        ...item,
+        cover_image_url: item.cover_image_url || knownCovers[item.id] || null,
+        progress: previousProgress[item.id] || 0,
+      }))
 
-      if (materialsWithProgress.length > 0) {
-        _memoryCachedMaterials = materialsWithProgress
+      if (baseMaterials.length > 0) {
+        _memoryCachedMaterials = baseMaterials
         _memoryCachedVideos = finalVideos
         _memoryCachedTargetExam = targetTrack
-        setMaterials(materialsWithProgress)
+        setMaterials(baseMaterials)
+        setLoading(false)
+        prefetchCovers(baseMaterials)
+        // Save every PDF on the device in the background (~3 MB total) so the Library works offline.
+        // Already-saved files are skipped, so this costs nothing on later visits.
+        setTimeout(() => {
+          precachePdfs(baseMaterials.map((m) => resolveImageUrl(m.pdf_url))).catch(() => { })
+        }, 4000)
         setCache('library_target_exam', targetTrack).catch(() => { })
-        setCache('library_materials', materialsWithProgress).catch(() => { })
+        setCache('library_materials', baseMaterials).catch(() => { })
         setCache('library_videos', finalVideos).catch(() => { })
 
-        // Covers are fetched separately so the shelf appears immediately; they fill in as soon as they arrive
-        fetchCoverMap().then((coverMap) => {
-          if (!coverMap || Object.keys(coverMap).length === 0) return
-          const withCovers = (list) => list.map((m) => (coverMap[m.id] ? { ...m, cover_image_url: coverMap[m.id] } : m))
-          _memoryCachedMaterials = withCovers(_memoryCachedMaterials || materialsWithProgress)
-          setMaterials((prev) => withCovers(prev))
+        // Reading progress fills in when it arrives (does not delay the shelf)
+        progPromise.then((progRes) => {
+          const progressList = Array.isArray(progRes?.data) ? progRes.data : []
+          if (progressList.length === 0) return
+          const progressMap = {}
+          progressList.forEach((p) => { if (p?.reading_material_id) progressMap[p.reading_material_id] = p })
+          const withProgress = (list) => list.map((item) => {
+            const prog = progressMap[item.id]
+            if (!prog) return item
+            if (prog.is_completed) return { ...item, progress: 100 }
+            if (prog.current_chapter_number && item.total_pages > 0) {
+              const computed = Math.round(((prog.current_chapter_number - 1) / item.total_pages) * 100)
+              return { ...item, progress: Math.min(Math.max(computed, 0), 100) }
+            }
+            return item
+          })
+          _memoryCachedMaterials = withProgress(_memoryCachedMaterials || baseMaterials)
+          setMaterials((prev) => withProgress(prev))
           setCache('library_materials', _memoryCachedMaterials).catch(() => { })
         }).catch(() => { })
+
+        // Rare: rows with no cover_image_url but a legacy thumbnail_url — fetch just those
+        const missing = baseMaterials.filter((m) => !m.cover_image_url).map((m) => m.id)
+        if (missing.length > 0) {
+          fetchLegacyCovers(missing).then((coverMap) => {
+            if (!coverMap || Object.keys(coverMap).length === 0) return
+            const withCovers = (list) => list.map((m) => (!m.cover_image_url && coverMap[m.id] ? { ...m, cover_image_url: coverMap[m.id] } : m))
+            _memoryCachedMaterials = withCovers(_memoryCachedMaterials || baseMaterials)
+            setMaterials((prev) => withCovers(prev))
+            setCache('library_materials', _memoryCachedMaterials).catch(() => { })
+          }).catch(() => { })
+        }
       } else if (rawMaterials.length === 0 && rRes.status === 'fulfilled') {
         // Query succeeded but returned 0 items from remote
         _memoryCachedMaterials = []
@@ -1036,8 +1141,10 @@ export default function Library({ navigation }) {
       }
     } catch (e) {
       console.error('Library load error:', e)
-      setError('Failed to load materials.')
+      // Keep showing the saved shelf if we have one; only show an error when there is nothing to show
+      if (!(_memoryCachedMaterials && _memoryCachedMaterials.length > 0)) setError('Failed to load materials.')
     } finally {
+      if (ownsLoad) _libraryLoadInFlight = false
       setLoading(false)
     }
   }
@@ -1330,12 +1437,9 @@ export default function Library({ navigation }) {
                     activeOpacity={0.8}
                     onPress={() => {
                       if (activeChip === sub) return
-                      setMaterialsLoading(true)
+                      // filtering is local and instant — no artificial loader (it also remounted every cover)
                       setActiveChip(sub)
                       setVideoTopicFilter(sub)
-                      setTimeout(() => {
-                        setMaterialsLoading(false)
-                      }, 250)
                     }}
                   >
                     <View style={[
@@ -1419,15 +1523,7 @@ export default function Library({ navigation }) {
                             <MaterialCard
                               key={item.id}
                               item={item}
-                              onPress={() => navigation?.navigate('ReadingMaterial', {
-                                materialId: item.id,
-                                title: item.title,
-                                subject: item.subject,
-                                learningObjective: item.learning_objective,
-                                pdfUrl: item.pdf_url,
-                                coverImageUrl: item.cover_image_url || item.cover_url || item.thumbnail_url,
-                                totalPages: item.total_pages || 1,
-                              })}
+                              onPress={openMaterial}
                             />
                           ))}
                         </ScrollView>
@@ -1493,14 +1589,22 @@ export default function Library({ navigation }) {
                         <Text style={styles.categoryTitle}>{subTitle}</Text>
                         <Text style={styles.categoryCount}>{vids.length} videos</Text>
                       </View>
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalCards}>
-                        {vids.map(video => {
+                      <FlatList
+                        horizontal
+                        data={vids}
+                        keyExtractor={(video, i) => String(video.id || video.url || i)}
+                        showsHorizontalScrollIndicator={false}
+                        contentContainerStyle={styles.horizontalCards}
+                        initialNumToRender={3}
+                        maxToRenderPerBatch={4}
+                        windowSize={5}
+                        removeClippedSubviews={Platform.OS === 'android'}
+                        renderItem={({ item: video }) => {
                           const durationMins = video.duration_minutes || 15
-                          const yId = video.youtube_id || (video.url?.match(/v=([a-zA-Z0-9_-]{11})/)?.[1]) || 'FZGugFqdr60'
-                          const thumb = video.thumbnail_url || `https://i.ytimg.com/vi/${yId}/hqdefault.jpg`
+                          const yId = video.youtube_id || (video.url?.match(/(?:v=|youtu\.be\/|embed\/)([a-zA-Z0-9_-]{11})/)?.[1]) || 'FZGugFqdr60'
+                          const thumb = video.thumbnail_url || `https://i.ytimg.com/vi/${yId}/mqdefault.jpg`
                           return (
                             <TouchableOpacity
-                              key={video.id || video.url}
                               style={styles.videoCard}
                               activeOpacity={0.85}
                               onPress={() => navigation?.navigate('VideoLectureDetail', { video, hideNav: true })}
@@ -1527,8 +1631,8 @@ export default function Library({ navigation }) {
                               </View>
                             </TouchableOpacity>
                           )
-                        })}
-                      </ScrollView>
+                        }}
+                      />
                     </View>
                   ))
                 )}

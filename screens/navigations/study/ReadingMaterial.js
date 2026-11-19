@@ -10,6 +10,8 @@ import { supabase } from '../../../utils/supabase'
 import { getCache, setCache } from '../../../utils/cache'
 import { withTimeout, writeOrQueue } from '../../../utils/queryHelper'
 import { resolveImageUrl } from '../../../utils/imageUrl'
+import { getLocalPdf, downloadPdf, readPdfBase64, getPdfJsScripts } from '../../../utils/offlineFiles'
+import { hasInternet } from '../../../utils/connectivity'
 
 const MAX_INLINE_PDF_BYTES = 15 * 1024 * 1024
 
@@ -33,6 +35,29 @@ async function fetchPdfAsBase64(url, timeoutMs = 45000) {
     reader.readAsDataURL(blob)
   })
 }
+
+/**
+ * Offline-first PDF loading: the saved copy on the device is used when present (no network at all);
+ * otherwise the PDF is downloaded once into permanent storage and reused from then on.
+ */
+async function loadPdfBase64(url) {
+  const local = getLocalPdf(url)
+  if (local) {
+    if ((local.size || 0) > MAX_INLINE_PDF_BYTES) return null
+    return await readPdfBase64(local)
+  }
+  try {
+    const saved = await withTimeout(downloadPdf(url), 45000, 'The PDF took too long to download')
+    if ((saved.size || 0) > MAX_INLINE_PDF_BYTES) return null
+    return await readPdfBase64(saved)
+  } catch (e) {
+    if (!(await hasInternet())) {
+      throw new Error("This document hasn't been saved on this device yet. Connect to the internet once to open it, and it will be available offline after that.")
+    }
+    // File storage unavailable for some reason: fall back to in-memory download
+    return await fetchPdfAsBase64(url)
+  }
+}
 import { SkeletonItem } from '../../../components/Skeleton'
 import { calculateReadingPoints, recordPointsEntry } from '../../../utils/pointsEngine'
 
@@ -43,7 +68,10 @@ import { calculateReadingPoints, recordPointsEntry } from '../../../utils/points
  *
  * @param {string | null | undefined} rawUrl
  */
-function getWebViewSource(rawUrl, base64Data) {
+// Keeps embedded script text from closing the surrounding <script> tag early
+const inlineScript = (code) => String(code || '').replace(/<\/script/gi, '<\\/script')
+
+function getWebViewSource(rawUrl, base64Data, pdfJs) {
   if (!rawUrl || typeof rawUrl !== 'string') return { uri: '' }
   const trimmed = rawUrl.trim()
 
@@ -64,7 +92,10 @@ function getWebViewSource(rawUrl, base64Data) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=3, user-scalable=yes">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+  ${pdfJs
+    // Saved on the device: viewer works with no internet. The worker runs in-page (window.pdfjsWorker).
+    ? `<script>${inlineScript(pdfJs.lib)}</script><script>${inlineScript(pdfJs.worker)}</script>`
+    : '<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>'}
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -136,7 +167,9 @@ function getWebViewSource(rawUrl, base64Data) {
   <script>
     (function() {
       try {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+        if (!window.pdfjsWorker) {
+          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+        }
         const docUrl = ${JSON.stringify(trimmed)};
 
         const b64 = ${JSON.stringify(base64Data || '')};
@@ -218,6 +251,7 @@ export default function ReadingMaterial({ navigation, route }) {
   const [pdfBase64, setPdfBase64] = React.useState(null)
   const [pdfPreparing, setPdfPreparing] = React.useState(false)
   const [pdfPrepError, setPdfPrepError] = React.useState(null)
+  const [pdfJsScripts, setPdfJsScripts] = React.useState(null)
 
   // Android: download the PDF natively, then hand it to the viewer (fixes blank/CORS-blocked documents)
   React.useEffect(() => {
@@ -226,16 +260,20 @@ export default function ReadingMaterial({ navigation, route }) {
     setPdfPreparing(true)
     setPdfPrepError(null)
     setPdfBase64(null)
-    fetchPdfAsBase64(resolvedPdfUrl)
-      .then((b64) => { if (!cancelled) setPdfBase64(b64) }) // null => too large, viewer streams it by URL instead
+    Promise.all([loadPdfBase64(resolvedPdfUrl), getPdfJsScripts()])
+      .then(([b64, scripts]) => {
+        if (cancelled) return
+        setPdfJsScripts(scripts) // null => viewer loads PDF.js from the CDN
+        setPdfBase64(b64) // null => too large, viewer streams it by URL instead
+      })
       .catch((e) => { if (!cancelled) setPdfPrepError(e?.message || 'Could not download the PDF') })
       .finally(() => { if (!cancelled) setPdfPreparing(false) })
     return () => { cancelled = true }
   }, [needsInlinePdf, resolvedPdfUrl])
 
   const pdfSourceMemo = React.useMemo(
-    () => getWebViewSource(resolvedPdfUrl, pdfBase64),
-    [resolvedPdfUrl, pdfBase64]
+    () => getWebViewSource(resolvedPdfUrl, pdfBase64, pdfJsScripts),
+    [resolvedPdfUrl, pdfBase64, pdfJsScripts]
   )
 
   React.useEffect(() => {
@@ -265,7 +303,8 @@ export default function ReadingMaterial({ navigation, route }) {
         let matErr = null
         try {
           const matRes = await withTimeout(
-            supabase.from('reading_materials').select('*').eq('id', materialId).maybeSingle(),
+            // Only what this screen uses — `description` holds the full extracted PDF text (~100KB) and is skipped
+            supabase.from('reading_materials').select('id, title, subtitle, subject, pdf_url, cover_image_url, total_pages, learning_objective').eq('id', materialId).maybeSingle(),
             8000
           )
           matData = matRes?.data
@@ -441,7 +480,12 @@ export default function ReadingMaterial({ navigation, route }) {
       {pdfUrl && needsInlinePdf && pdfPreparing ? (
         <View style={styles.pdfLoadingContainer}>
           <ActivityIndicator size="large" color="#13294b" />
-          <Text style={styles.pdfLoadingText}>Downloading document…</Text>
+          <Text style={styles.pdfLoadingText}>Opening document…</Text>
+        </View>
+      ) : pdfUrl && needsInlinePdf && pdfPrepError && !pdfBase64 ? (
+        <View style={styles.pdfLoadingContainer}>
+          <Feather name="cloud-off" size={34} color="#94a3b8" />
+          <Text style={[styles.pdfLoadingText, { textAlign: 'center', paddingHorizontal: 24 }]}>{pdfPrepError}</Text>
         </View>
       ) : pdfUrl ? (
         <View style={styles.pdfViewerContainer}>

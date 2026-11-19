@@ -35,14 +35,65 @@ export default function OfflineToast({ isOffline, syncNotice }) {
     }
   }, [isOffline])
 
-  // Determine current toast configuration
+  // Determine current toast configuration.
+  // syncNotice: null | { type: 'syncing' | 'synced' | 'pending' | 'error' | 'waiting', count }
+  // Offline always wins: we never claim "synced" or "syncing" without an internet connection.
+  const notice = syncNotice && typeof syncNotice === 'object' ? syncNotice : (syncNotice ? { type: syncNotice, count: 0 } : null)
+  const n = notice?.count || 0
+  const changesLabel = n === 1 ? '1 change' : `${n} changes`
   let config = null
 
-  if (syncNotice === 'syncing') {
+  if (isOffline) {
+    if (!dismissedOffline) {
+      config = {
+        type: 'offline',
+        title: "You're offline",
+        subtitle: notice?.type === 'waiting' && n > 0
+          ? `Your saved content is available locally. ${changesLabel} will sync when you're connected.`
+          : "Your saved content is available locally. Changes will sync when you're connected.",
+        icon: <Feather name="cloud-off" size={15} color="#fbbf24" />,
+        bgColor: '#0f172a',
+        borderColor: '#334155',
+        iconBg: 'rgba(245, 158, 11, 0.15)',
+        titleColor: '#ffffff',
+        subtitleColor: '#cbd5e1',
+        canDismiss: true,
+        autoHide: false,
+      }
+    }
+  } else if (notice?.type === 'pending') {
+    config = {
+      type: 'pending',
+      title: 'Changes waiting to sync',
+      subtitle: n > 0 ? `${changesLabel} not uploaded yet. Retrying automatically…` : 'Retrying automatically…',
+      icon: <Feather name="refresh-cw" size={15} color="#fbbf24" />,
+      bgColor: '#0f172a',
+      borderColor: '#b45309',
+      iconBg: 'rgba(245, 158, 11, 0.15)',
+      titleColor: '#ffffff',
+      subtitleColor: '#fde68a',
+      autoHide: true,
+      autoHideDuration: 5000,
+    }
+  } else if (notice?.type === 'error') {
+    config = {
+      type: 'error',
+      title: "Some changes couldn't sync",
+      subtitle: n > 0 ? `${changesLabel} were rejected by the server after several tries.` : 'The server rejected some changes after several tries.',
+      icon: <Feather name="alert-triangle" size={15} color="#f87171" />,
+      bgColor: '#3b0a0a',
+      borderColor: '#dc2626',
+      iconBg: 'rgba(220, 38, 38, 0.18)',
+      titleColor: '#ffffff',
+      subtitleColor: '#fecaca',
+      autoHide: true,
+      autoHideDuration: 6000,
+    }
+  } else if (notice?.type === 'syncing') {
     config = {
       type: 'syncing',
-      title: 'Syncing Offline Changes',
-      subtitle: 'Uploading progress & attempts to cloud...',
+      title: 'Syncing your changes...',
+      subtitle: n > 0 ? `Uploading ${changesLabel} to your account` : 'Uploading your progress to your account',
       icon: <ActivityIndicator size="small" color="#60a5fa" style={{ transform: [{ scale: 0.8 }] }} />,
       bgColor: '#0f2747',
       borderColor: '#2563eb',
@@ -51,11 +102,11 @@ export default function OfflineToast({ isOffline, syncNotice }) {
       subtitleColor: '#93c5fd',
       autoHide: false,
     }
-  } else if (syncNotice === 'synced') {
+  } else if (notice?.type === 'synced') {
     config = {
       type: 'synced',
-      title: 'Back Online • Synced!',
-      subtitle: 'Offline activity committed to your account',
+      title: 'All changes synced',
+      subtitle: 'Your offline activity is saved to your account',
       icon: <Feather name="check-circle" size={16} color="#34d399" />,
       bgColor: '#064e3b',
       borderColor: '#10b981',
@@ -64,20 +115,6 @@ export default function OfflineToast({ isOffline, syncNotice }) {
       subtitleColor: '#a7f3d0',
       autoHide: true,
       autoHideDuration: 3500,
-    }
-  } else if (isOffline && !dismissedOffline) {
-    config = {
-      type: 'offline',
-      title: 'Offline Mode Active',
-      subtitle: 'Practice questions & study library ready offline',
-      icon: <Feather name="cloud-off" size={15} color="#fbbf24" />,
-      bgColor: '#0f172a',
-      borderColor: '#334155',
-      iconBg: 'rgba(245, 158, 11, 0.15)',
-      titleColor: '#ffffff',
-      subtitleColor: '#cbd5e1',
-      canDismiss: true,
-      autoHide: false,
     }
   }
 
@@ -118,7 +155,7 @@ export default function OfflineToast({ isOffline, syncNotice }) {
         clearTimeout(autoHideTimer.current)
       }
     }
-  }, [isOffline, syncNotice, dismissedOffline])
+  }, [isOffline, notice?.type, n, dismissedOffline])
 
   const hideToast = () => {
     Animated.parallel([
@@ -162,7 +199,7 @@ export default function OfflineToast({ isOffline, syncNotice }) {
           <Text style={[styles.toastTitle, { color: config?.titleColor || '#fff' }]} numberOfLines={1}>
             {config?.title}
           </Text>
-          <Text style={[styles.toastSubtitle, { color: config?.subtitleColor || '#94a3b8' }]} numberOfLines={1}>
+          <Text style={[styles.toastSubtitle, { color: config?.subtitleColor || '#94a3b8' }]} numberOfLines={2}>
             {config?.subtitle}
           </Text>
         </View>

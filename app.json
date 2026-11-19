@@ -34,11 +34,24 @@
     "plugins": [
       "expo-web-browser",
       "expo-sqlite",
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-updates"
     ],
     "extra": {
       "eas": {
         "projectId": "f399ac4d-bcbd-4cdf-8aa3-380d0d0964f5"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/f399ac4d-bcbd-4cdf-8aa3-380d0d0964f5",
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0,
+      "requestHeaders": {
+        "expo-channel-name": "production"
       }
     }
   }
